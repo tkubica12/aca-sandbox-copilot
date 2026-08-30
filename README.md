@@ -22,11 +22,8 @@ ghcr.io/tkubica12/aca-sandbox-copilot:latest
 ```
 
 Pushes to `main` publish `latest`, branch, and commit-SHA tags. Pull requests
-build without pushing. The GHCR package must be **public** so the Sandbox
-service can import it without registry credentials. After the first workflow
-run, open the package's **Package settings**, select **Change visibility**, and
-make it public. GitHub requires this one-time confirmation and warns that
-public package visibility cannot be reverted.
+build without pushing. The GHCR package is **public**, so the Sandbox service
+imports it without registry credentials.
 
 Run locally:
 
@@ -70,6 +67,10 @@ Defaults can be overridden:
 RESOURCE_GROUP=my-rg \
 LOCATION=westus2 \
 SANDBOX_GROUP=my-group \
+VOLUME_SIZE=1Gi \
+SANDBOX_CPU=2000m \
+SANDBOX_MEMORY=4096Mi \
+SANDBOX_DISK=20480Mi \
 IMAGE=ghcr.io/my-org/my-image:tag \
 ./scripts/deploy.sh
 ```
@@ -90,13 +91,13 @@ file survived, and leaves a detachable tmux window running.
 Join the session:
 
 ```bash
-aca sandbox exec -l name=copilot-cli -c "tmux attach -t copilot"
+aca sandbox shell -l name=copilot-cli -c "tmux attach -t copilot"
 ```
 
-For a real interactive terminal, open **Interactive shell** in
+You can also open **Interactive shell** in
 [sandboxes.azure.com](https://sandboxes.azure.com), then run
-`tmux attach -t copilot`. Authenticate Copilot with `/login`. Never bake a
-token into the image.
+`tmux attach -t copilot`. Authenticate Copilot with `/login`. Never bake a token
+into the image.
 
 ## Clean up
 
@@ -105,7 +106,10 @@ token into the image.
 ```
 
 `DataDisk` is single-writer, full-POSIX storage and fits durable agent
-workspaces. Deleting the volume permanently deletes its data.
+workspaces. It requires disk-mode auto-suspend, which the scripts configure.
+The declarative sandbox manifest sets a 20 GiB root disk, leaving disk-budget
+headroom for the 1 GiB data disk at 2000m CPU. Deleting the volume permanently
+deletes its data.
 
 ## References
 
