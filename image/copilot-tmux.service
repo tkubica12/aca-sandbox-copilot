@@ -1,0 +1,14 @@
+[Unit]
+Description=Persistent GitHub Copilot tmux session
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ensure-tmux
+Environment=TMUX_SESSION=copilot
+Environment=TMUX_WORKDIR=/mnt/data
+
+[Install]
+WantedBy=multi-user.target
+

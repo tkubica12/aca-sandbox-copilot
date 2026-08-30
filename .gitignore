@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.sandbox.env
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+
