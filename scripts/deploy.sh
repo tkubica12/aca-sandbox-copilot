@@ -47,17 +47,12 @@ disk_id="$(
     | head -n 1
 )"
 if [[ -z "$disk_id" ]]; then
-  disk_args=(
-    --image "$IMAGE"
-    --name "$DISK_NAME"
-    --label project=aca-sandbox-copilot
-    -o json
-  )
-  if [[ -n "${GHCR_USERNAME:-}" && -n "${GHCR_TOKEN:-}" ]]; then
-    disk_args+=(--username "$GHCR_USERNAME" --token "$GHCR_TOKEN")
-  fi
   disk_id="$(
-    aca sandboxgroup disk create "${disk_args[@]}" \
+    aca sandboxgroup disk create \
+      --image "$IMAGE" \
+      --name "$DISK_NAME" \
+      --label project=aca-sandbox-copilot \
+      -o json \
       | jq -r '.id // .diskImage.id'
   )"
 fi

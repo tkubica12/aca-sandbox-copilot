@@ -23,13 +23,10 @@ ghcr.io/tkubica12/aca-sandbox-copilot:latest
 
 Pushes to `main` publish `latest`, branch, and commit-SHA tags. Pull requests
 build without pushing. The GHCR package must be **public** so the Sandbox
-service can import it without registry credentials.
-
-For a private package, supply a read-only package token only for the import:
-
-```bash
-GHCR_USERNAME=my-user GHCR_TOKEN=github_pat_... ./scripts/deploy.sh
-```
+service can import it without registry credentials. After the first workflow
+run, open the package's **Package settings**, select **Change visibility**, and
+make it public. GitHub requires this one-time confirmation and warns that
+public package visibility cannot be reverted.
 
 Run locally:
 
