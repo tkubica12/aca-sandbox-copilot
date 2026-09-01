@@ -21,9 +21,10 @@ GitHub Actions builds `image/Dockerfile` and publishes:
 ghcr.io/tkubica12/aca-sandbox-copilot:latest
 ```
 
-Pushes to `main` publish `latest`, branch, and commit-SHA tags. Pull requests
-build without pushing. The GHCR package is **public**, so the Sandbox service
-imports it without registry credentials.
+Pushes to `main` publish `latest` and an immutable UTC timestamp tag such as
+`20260831-192054`. Seconds keep multiple builds in one day distinct while the
+tag stays short and sortable. Pull requests build without pushing. The GHCR
+package is **public**, so the Sandbox service imports it without credentials.
 
 Run locally:
 
@@ -41,75 +42,73 @@ Detach without stopping Copilot: `Ctrl-b`, then `d`. Reconnect with the same
 
 Prerequisites:
 
-- Azure subscription and `az login`
-- preview [`aca` CLI](https://learn.microsoft.com/azure/container-apps/sandboxes-quickstart-cli)
-- `Container Apps SandboxGroup Data Owner` permission
-- `jq`
-- public GHCR image produced by the workflow
+- Python 3.10 or later
+- Azure CLI authenticated with `az login`
+- Permission to create resource groups and role assignments
+- Fine-grained GitHub PAT with the **Copilot Requests** account permission
 
-Install `aca` on Linux:
+Create `.env` from `.env.sample` and set `COPILOT_GITHUB_TOKEN` to a token
+starting with `github_pat_`. The `.env` file is ignored by Git.
 
-```bash
-curl -fsSL https://aka.ms/aca-cli-install | sh
+```text
+COPILOT_GITHUB_TOKEN=github_pat_...
 ```
 
-Provision a resource group, sandbox group, custom disk image, persistent
-`DataDisk`, and sandbox:
+Deploy:
 
-```bash
-chmod +x scripts/*.sh
-./scripts/deploy.sh
+```console
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python scripts/deploy.py
 ```
 
-Defaults can be overridden:
+On Windows PowerShell:
 
-```bash
-RESOURCE_GROUP=my-rg \
-LOCATION=westus2 \
-SANDBOX_GROUP=my-group \
-VOLUME_SIZE=1Gi \
-SANDBOX_CPU=2000m \
-SANDBOX_MEMORY=4096Mi \
-SANDBOX_DISK=20480Mi \
-IMAGE=ghcr.io/my-org/my-image:tag \
-./scripts/deploy.sh
+```console
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe scripts\deploy.py
 ```
 
-The deployment writes non-secret resource identifiers to ignored
-`.sandbox.env`.
+The deployment uses the official `azure-containerapps-sandbox` Python SDK.
+The preview `aca` CLI is needed only for the interactive shell command below.
+
+Defaults create:
+
+- resource group `rg-copilot-sandbox` in Sweden Central
+- sandbox group `copilot-sandbox-group`
+- public custom disk from `ghcr.io/tkubica12/aca-sandbox-copilot:latest`
+- 1 GiB persistent DataDisk mounted at `/mnt/data`
+- sandbox `copilot-cli` with the GitHub Copilot credential attached
+
+Change values in `.env` to override these defaults or select an immutable
+timestamp image tag.
 
 ## Test
 
-The test checks all installed CLIs, verifies the `copilot` tmux session, writes
-to `/mnt/data`, replaces the sandbox, remounts the same volume, verifies the
-file survived, and leaves a detachable tmux window running.
+Run `.venv/bin/python scripts/test.py` on macOS/Linux or
+`.venv\Scripts\python.exe scripts\test.py` on Windows.
 
-```bash
-./scripts/test-sandbox.sh
+The test checks the installed CLIs, tmux, Copilot authentication, and DataDisk
+persistence across sandbox replacement.
+
+## Connect
+
+```console
+aca --resource-group rg-copilot-sandbox --region swedencentral sandbox shell --group copilot-sandbox-group --selector name=copilot-cli --command "tmux attach -t copilot"
 ```
 
-Join the session:
-
-```bash
-aca sandbox shell -l name=copilot-cli -c "tmux attach -t copilot"
-```
-
-You can also open **Interactive shell** in
-[sandboxes.azure.com](https://sandboxes.azure.com), then run
-`tmux attach -t copilot`. Authenticate Copilot with `/login`. Never bake a token
-into the image.
+Detach with `Ctrl-b`, then `d`. Reconnect with the same command.
 
 ## Clean up
 
-```bash
-./scripts/cleanup.sh
-```
+Run `.venv/bin/python scripts/cleanup.py` on macOS/Linux or
+`.venv\Scripts\python.exe scripts\cleanup.py` on Windows.
 
 `DataDisk` is single-writer, full-POSIX storage and fits durable agent
-workspaces. It requires disk-mode auto-suspend, which the scripts configure.
-The declarative sandbox manifest sets a 20 GiB root disk, leaving disk-budget
-headroom for the 1 GiB data disk at 2000m CPU. Deleting the volume permanently
-deletes its data.
+workspaces. It requires disk-mode auto-suspend, which the deployment configures.
+The sandbox uses a 20 GiB root disk, leaving disk-budget headroom for the
+1 GiB data disk at 2000m CPU.
 
 ## References
 

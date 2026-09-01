@@ -1,7 +1,6 @@
 .env
 .env.*
-!.env.example
-.sandbox.env
+!.env.sample
 .DS_Store
 Thumbs.db
 .idea/
@@ -13,4 +12,3 @@ __pycache__/
 .venv/
 dist/
 build/
-
