@@ -31,3 +31,5 @@
 - Connector/API gaps: ports objectIds + connector children use preview REST.
 - RG tag `SecurityControl=ignore` required here. Connector Service Bus auth needs local key.
 - Auto-suspend: 60s, disk mode. Disk resume reruns `/usr/local/bin/container-entrypoint`.
+- Worker disables auto-suspend via managed identity per task; restores timeout afterward.
+- Disk restart env: `/mnt/data/scheduler/runtime.json`. Non-secret + `gho_placeholder` only.

@@ -26,6 +26,7 @@ from common import (
     matching_disk_images,
     matching_sandboxes,
     wait_for_data_plane,
+    write_runtime_environment,
 )
 
 
@@ -180,6 +181,11 @@ def main() -> None:
             clients,
             disk_id=image.id,
             credential_id=provider_credential["id"],
+        )
+        write_runtime_environment(
+            config,
+            sandbox,
+            sandbox_id=sandbox.sandbox_id,
         )
         callback_url = configure_connector(
             config,

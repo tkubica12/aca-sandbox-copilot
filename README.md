@@ -158,6 +158,14 @@ image entrypoint again, restores the tmux session, and runs the HTTP worker.
 The worker port uses `activationMode=OnDemand`, so the Connector Namespace
 callback wakes a stopped sandbox before delivering the due task.
 
+Before each task, the worker uses the Sandbox Group managed identity to disable
+auto-suspend. It restores the configured disk-mode timeout after the command
+finishes, so long-running Copilot work is not interrupted. Non-secret runtime
+configuration and the provider-credential placeholder are persisted in
+`/mnt/data/scheduler/runtime.json` because disk-mode restart does not preserve
+the original process environment. The real GitHub token remains outside the
+sandbox and is injected only by the provider credential proxy.
+
 ## Connect
 
 ```console

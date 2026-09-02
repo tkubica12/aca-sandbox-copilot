@@ -82,6 +82,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
     && python3 -m pip install --no-cache-dir \
+        azure-containerapps-sandbox==0.1.0b4 \
         azure-identity==1.25.3 \
         azure-servicebus==7.14.3 \
         websocket-client==1.8.0 \

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from contextlib import contextmanager
 import json
 import os
 import subprocess
@@ -16,7 +17,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from azure.containerapps.sandbox import (
+    AutoSuspendPolicy,
+    LifecyclePolicy,
+    SandboxGroupClient,
+    endpoint_for_region,
+)
+from azure.identity import DefaultAzureCredential
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schedule import schedule_task
@@ -25,10 +34,73 @@ DATA_ROOT = Path(os.environ.get("SCHEDULER_DATA_ROOT", "/mnt/data")).resolve()
 TASK_ROOT = DATA_ROOT / "tasks"
 LOG_ROOT = DATA_ROOT / "scheduler" / "logs"
 RUN_LOCK = threading.Lock()
+RUNTIME_ENVIRONMENT = DATA_ROOT / "scheduler" / "runtime.json"
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def load_runtime_environment() -> None:
+    if not RUNTIME_ENVIRONMENT.is_file():
+        return
+    values = json.loads(RUNTIME_ENVIRONMENT.read_text(encoding="utf-8"))
+    if not isinstance(values, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in values.items()
+    ):
+        raise ValueError("Scheduler runtime environment must contain string values.")
+    for key, value in values.items():
+        os.environ[key] = value
+
+
+@contextmanager
+def suspend_guard() -> Iterator[None]:
+    required = {
+        name: os.environ.get(name, "")
+        for name in (
+            "AZURE_SUBSCRIPTION_ID",
+            "AZURE_RESOURCE_GROUP",
+            "AZURE_LOCATION",
+            "SANDBOX_GROUP",
+            "SANDBOX_ID",
+            "SANDBOX_AUTO_SUSPEND_SECONDS",
+        )
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(
+            f"Scheduler lifecycle configuration is missing: {', '.join(missing)}"
+        )
+    interval = int(required["SANDBOX_AUTO_SUSPEND_SECONDS"])
+    credential = DefaultAzureCredential()
+    group = SandboxGroupClient(
+        endpoint_for_region(required["AZURE_LOCATION"]),
+        credential,
+        subscription_id=required["AZURE_SUBSCRIPTION_ID"],
+        resource_group=required["AZURE_RESOURCE_GROUP"],
+        sandbox_group=required["SANDBOX_GROUP"],
+    )
+    sandbox = group.get_sandbox_client(required["SANDBOX_ID"])
+    try:
+        sandbox.set_lifecycle_policy(
+            LifecyclePolicy(auto_suspend=AutoSuspendPolicy(enabled=False))
+        )
+        yield
+    finally:
+        try:
+            sandbox.set_lifecycle_policy(
+                LifecyclePolicy(
+                    auto_suspend=AutoSuspendPolicy(
+                        enabled=True,
+                        interval=interval,
+                        mode="Disk",
+                    )
+                )
+            )
+        finally:
+            group.close()
+            credential.close()
 
 
 def get_case_insensitive(mapping: dict[str, Any], key: str) -> Any:
@@ -144,6 +216,7 @@ def write_result(task_id: str, result: dict[str, Any]) -> None:
 
 
 def execute_task(task: dict[str, Any]) -> dict[str, Any]:
+    load_runtime_environment()
     task = validate_task(task)
     started = utc_now()
     command = (
@@ -151,14 +224,15 @@ def execute_task(task: dict[str, Any]) -> dict[str, Any]:
         if task["type"] == "prompt"
         else script_command(task)
     )
-    completed = subprocess.run(
-        command,
-        cwd=DATA_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=int(os.environ.get("TASK_TIMEOUT_SECONDS", "900")),
-        check=False,
-    )
+    with suspend_guard():
+        completed = subprocess.run(
+            command,
+            cwd=DATA_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=int(os.environ.get("TASK_TIMEOUT_SECONDS", "900")),
+            check=False,
+        )
     result: dict[str, Any] = {
         "id": task["id"],
         "type": task["type"],

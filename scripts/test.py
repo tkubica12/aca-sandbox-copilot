@@ -128,6 +128,8 @@ def main() -> None:
                 "&& tmux -V && test -x /usr/local/bin/schedule-task "
                 "&& test -x /usr/local/bin/sandbox-task-worker "
                 "&& test -f /root/.copilot/skills/scheduler/SKILL.md "
+                "&& test -f /mnt/data/scheduler/runtime.json "
+                "&& test \"$(stat -c %a /mnt/data/scheduler/runtime.json)\" = 600 "
                 "&& tmux has-session -t copilot "
                 "&& pgrep -af '/opt/copilot-scheduler/worker.py' "
                 "&& curl -fsS http://127.0.0.1:8080/health",
@@ -193,7 +195,7 @@ Use the schedule-task command from the skill for both scheduled messages.
             sandbox,
             ["copilot", "--allow-all-tools", "-p", copilot_prompt],
         )
-        print(copilot_output.strip())
+        print(copilot_output.strip().encode("ascii", "backslashreplace").decode())
 
         if exec_checked(
             sandbox,

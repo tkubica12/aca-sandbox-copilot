@@ -689,6 +689,41 @@ def create_sandbox(
     ).result()
 
 
+def write_runtime_environment(
+    config: Config,
+    sandbox: Any,
+    *,
+    sandbox_id: str,
+) -> None:
+    values = {
+        "AZURE_SUBSCRIPTION_ID": config.subscription_id,
+        "AZURE_RESOURCE_GROUP": config.resource_group,
+        "AZURE_LOCATION": config.location,
+        "SANDBOX_GROUP": config.sandbox_group,
+        "SANDBOX_ID": sandbox_id,
+        "SANDBOX_AUTO_SUSPEND_SECONDS": str(config.auto_suspend_seconds),
+        "SERVICE_BUS_NAMESPACE": (
+            f"{config.service_bus_namespace}.servicebus.windows.net"
+        ),
+        "SERVICE_BUS_QUEUE": config.service_bus_queue,
+        "WORKER_PORT": str(config.worker_port),
+        "COPILOT_GITHUB_TOKEN": "gho_placeholder",
+    }
+    encoded = base64.b64encode(
+        json.dumps(values, indent=2).encode("utf-8")
+    ).decode("ascii")
+    exec_checked(
+        sandbox,
+        [
+            "bash",
+            "-lc",
+            "umask 077; mkdir -p /mnt/data/scheduler; "
+            f"printf %s {shlex.quote(encoded)} | base64 -d "
+            "> /mnt/data/scheduler/runtime.json",
+        ],
+    )
+
+
 def exec_checked(sandbox: Any, command: list[str]) -> str:
     result = sandbox.exec(shlex.join(command))
     if result.exit_code != 0:
