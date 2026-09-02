@@ -1,61 +1,73 @@
 # GitHub Copilot CLI on Azure Container Apps Sandboxes
 
-Rich Ubuntu image for running GitHub Copilot CLI in **Azure Container Apps
-Sandboxes** at [sandboxes.azure.com](https://sandboxes.azure.com). This is not
-regular Azure Container Apps and not dynamic sessions.
+Run a persistent GitHub Copilot CLI workspace inside
+[Azure Container Apps Sandboxes](https://sandboxes.azure.com). The repository
+provides a ready-to-use Ubuntu image, Python deployment automation, durable
+storage, scheduled tasks, and optional email-triggered work through AgentMail.
 
-The image includes:
+This project targets **ACA Sandboxes**, not regular Azure Container Apps or
+Container Apps dynamic sessions.
 
-- GitHub Copilot CLI and GitHub CLI
-- Azure CLI and the preview `aca` Sandboxes CLI
-- Terraform
-- Bash, Python, pip, uv, Node.js
-- jq, yq, ripgrep, fd, git, SSH, networking and build utilities
-- tmux with a persistent `copilot` session rooted at `/mnt/data`
-- authenticated HTTP task worker and Service Bus scheduling skill
+## What it provides
 
-## Image
+- GitHub Copilot CLI in a persistent `tmux` session
+- Azure CLI, GitHub CLI, Terraform, Python, Node.js, and common engineering tools
+- a 1 GiB persistent DataDisk mounted at `/mnt/data`
+- automatic suspension when idle and on-demand wake-up for scheduled work
+- durable prompt and script scheduling through Azure Service Bus
+- optional AgentMail integration for starting Copilot tasks by email
+- secret-backed outbound authentication without placing API keys on disk
 
-GitHub Actions builds `image/Dockerfile` and publishes:
+## How it works
 
 ```text
-ghcr.io/tkubica12/aca-sandbox-copilot:latest
+Interactive user ───────────────────────────────┐
+                                                │
+Scheduled task → Service Bus ────────────────┐  │
+                                             ▼  ▼
+AgentMail → Azure Function → Service Bus → ACA Sandbox
+                                             │
+                                             ▼
+                                  task worker → Copilot CLI
+                                             │
+                                             ▼
+                                      /mnt/data
 ```
 
-Pushes to `main` publish `latest` and an immutable UTC timestamp tag such as
-`20260831-192054`. Seconds keep multiple builds in one day distinct while the
-tag stays short and sortable. Pull requests build without pushing. The GHCR
-package is **public**, so the Sandbox service imports it without credentials.
+The sandbox keeps its workspace on the DataDisk and suspends compute while
+idle. A Connector Namespace consumes Service Bus messages and calls an
+Entra-protected `OnDemand` worker port, which wakes the sandbox before
+dispatching a task.
 
-Run locally:
+AgentMail is an optional internet-facing trigger. A Flex Consumption Azure
+Function validates the AgentMail webhook and places a reference to the email on
+Service Bus. The sandbox then fetches the canonical message and starts Copilot.
 
-```bash
-docker build -t copilot-sandbox image
-docker run --rm -d --name copilot-sandbox \
-  -v copilot-data:/mnt/data copilot-sandbox
-docker exec -it copilot-sandbox tmux attach -t copilot
-```
+See [Architecture](docs/architecture.md) for the complete data flows and
+security model.
 
-Detach without stopping Copilot: `Ctrl-b`, then `d`. Reconnect with the same
-`docker exec` command.
-
-## Deploy to Azure Container Apps Sandboxes
+## Quick start
 
 Prerequisites:
 
 - Python 3.10 or later
 - Azure CLI authenticated with `az login`
-- Permission to create resource groups and role assignments
-- Fine-grained GitHub PAT with the **Copilot Requests** account permission
+- permission to create Azure resources and role assignments
+- a fine-grained GitHub PAT with the **Copilot Requests** account permission
 
-Create `.env` from `.env.sample` and set `COPILOT_GITHUB_TOKEN` to a token
-starting with `github_pat_`. The `.env` file is ignored by Git.
+Create your local configuration:
+
+```console
+cp .env.sample .env
+```
+
+Set at least:
 
 ```text
 COPILOT_GITHUB_TOKEN=github_pat_...
 ```
 
-Deploy:
+Deploy on macOS or Linux:
 
 ```console
 python -m venv .venv
@@ -71,193 +83,72 @@ python -m venv .venv
 .venv\Scripts\python.exe scripts\deploy.py
 ```
 
-The deployment uses the official `azure-containerapps-sandbox` Python SDK.
-The preview `aca` CLI is needed only for the interactive shell command below.
+Connect to the persistent Copilot session:
 
-Defaults create:
+```console
+aca --resource-group rg-copilot-sandbox \
+  --region swedencentral \
+  sandbox shell \
+  --group copilot-sandbox-group \
+  --selector name=copilot-cli \
+  --command "tmux attach -t copilot"
+```
 
-- resource group `rg-copilot-sandbox` in Sweden Central
-- sandbox group `copilot-sandbox-group`
-- public custom disk from `ghcr.io/tkubica12/aca-sandbox-copilot:latest`
-- 1 GiB persistent DataDisk mounted at `/mnt/data`
-- sandbox `copilot-cli` with secret-backed GitHub authentication
-- Basic Service Bus namespace and `copilot-tasks` queue
-- system-assigned Sandbox Group identity with Service Bus sender/receiver access
-- Connector Namespace trigger with an Entra-protected on-demand worker port
-- optional AgentMail inbox and Flex Consumption Function webhook bridge
-
-The resource group is tagged `SecurityControl=ignore`. In the tested corporate
-subscription this exempts the demo from the policy that otherwise forces
-Service Bus local authentication off. The preview Connector Namespace Service
-Bus connection currently requires a Listen-only connection string. That
-credential is isolated in Connector Namespace and is never exposed to the
-sandbox. Deployment stops if the policy exemption is not effective.
-
-Connector Namespace is a regional preview and defaults to the Sandbox Group
-region, `swedencentral`.
-
-Change values in `.env` to override these defaults or select an immutable
-timestamp image tag.
-
-## Test
-
-Run `.venv/bin/python scripts/test.py` on macOS/Linux or
-`.venv\Scripts\python.exe scripts\test.py` on Windows.
-
-The test checks the installed CLIs, tmux, worker authentication, Copilot,
-DataDisk access, managed-identity scheduling, suspension, trigger-driven wake,
-and script and prompt dispatch.
+Detach without stopping the session with `Ctrl-b`, then `d`.
 
 ## Schedule work
 
-Run these commands inside the sandbox. Times must be future ISO 8601 timestamps
-with an offset; using UTC with `Z` is recommended.
+Inside the sandbox:
 
 ```console
-schedule-task prompt --at 2026-09-02T06:00:00Z \
-  --prompt "Inspect open issues and summarize blockers"
+schedule-task prompt \
+  --at 2026-09-07T06:00:00Z \
+  --prompt "Prepare the repository report"
 
-schedule-task script --at 2026-09-02T06:00:00Z \
-  --script report.py --arg weekly
-
-schedule-task prompt --at 2026-09-07T06:00:00Z \
-  --every weekly --occurrences 52 \
-  --prompt "Prepare the weekly repository report"
+schedule-task script \
+  --at 2026-09-07T07:00:00Z \
+  --script report.py \
+  --arg weekly
 ```
 
-Scripts must be `.py` or `.sh` files below `/mnt/data/tasks`. Arbitrary shell
-text and absolute paths are rejected. Results are persisted as JSON in
-`/mnt/data/scheduler/logs`; worker logs are in
-`/mnt/data/scheduler/worker.log`.
+Daily and weekly recurrence is also supported. See
+[Operations and testing](docs/operations.md) for the full command reference.
 
-The message schema is:
+## Enable AgentMail
 
-```json
-{
-  "version": 1,
-  "id": "UUID",
-  "type": "prompt",
-  "prompt": "Work to perform",
-  "scheduled_at": "2026-09-02T06:00:00Z"
-}
-```
-
-For a script, replace `prompt` with `"script": "report.py"` and
-`"args": ["weekly"]`. Daily or weekly schedules create every occurrence up
-front, use unique task IDs, and default to 52 occurrences. Set
-`--occurrences` between 1 and 366 to choose a different finite horizon.
-
-Service Bus scheduled delivery is external to the sandbox. The Connector
-Namespace polls the queue, consumes due messages, and posts the connector
-payload to the sandbox's Entra-protected port. The Connector Namespace identity
-is the only allowed port caller. The Sandbox Group identity schedules messages
-without keys through `DefaultAzureCredential`.
-
-Auto-suspend defaults to 60 seconds in disk mode because the attached DataDisk
-does not support memory-mode suspension. On resume, the sandbox starts the
-image entrypoint again, restores the tmux session, and runs the HTTP worker.
-The worker port uses `activationMode=OnDemand`, so the Connector Namespace
-callback wakes a stopped sandbox before delivering the due task.
-
-The current preview exposes no guest heartbeat, lease, busy flag, or
-readiness-to-suspend API. Task execution remains inside the synchronous
-Connector Namespace HTTP callback. Configure the auto-suspend interval above
-the longest expected task duration; the default 60 seconds is intended only
-for the short end-to-end test.
-
-Non-secret runtime configuration and the Copilot token placeholder are
-persisted in `/mnt/data/scheduler/runtime.json` because disk-mode restart does
-not preserve the original process environment. The real GitHub token is stored
-as a Sandbox Group secret and an egress header transform injects it only into
-requests to the GitHub and GitHub Copilot API hosts used by the CLI. The PAT is
-never placed in process environment, command arguments, the image, or the
-DataDisk. This explicit egress policy survives disk-mode suspend and resume.
-
-Disk restart currently drops the platform-managed identity environment.
-Therefore the worker does not require Azure authentication after wake:
-recurring occurrences are scheduled up front while managed identity is
-available, and due messages contain everything needed to execute the task.
-
-## Trigger work by AgentMail
-
-AgentMail integration is optional. Create an API key in the
-[AgentMail Console](https://console.agentmail.to/) under **API Keys**. The key
-starts with `am_` and is shown only once. Put it in the ignored `.env` file;
-do not paste it into source code or commit it:
+Create an AgentMail API key with inbox, message, webhook, and list permissions,
+then add the following values to `.env`:
 
 ```text
 AGENTMAIL_API_KEY=am_...
-AGENTMAIL_ALLOWED_SENDERS=you@example.com,second-owner@example.com
+AGENTMAIL_INBOX_ID=agent@agentmail.to
+AGENTMAIL_ALLOWED_SENDERS=you@example.com
 ```
 
-`AGENTMAIL_ALLOWED_SENDERS` accepts exact addresses only. Deployment creates
-both inbox-scoped `receive` and `reply` allowlists. An existing inbox can be
-selected with `AGENTMAIL_INBOX_ID`; otherwise the deployment idempotently
-creates `<AGENTMAIL_USERNAME>@<AGENTMAIL_DOMAIN>`.
+Redeploy with `scripts/deploy.py`. Emails from the exact allowlisted addresses
+will then create Copilot tasks. See [Architecture](docs/architecture.md) for
+the trust boundaries and [Operations and testing](docs/operations.md) for
+configuration and validation.
 
-With AgentMail configured, `scripts/deploy.py` also creates:
+## Container image
 
-- a Python Azure Function in Flex Consumption with no always-ready instances
-- a Function key supplied to AgentMail as the write-only `x-functions-key`
-  webhook header
-- Svix signature verification using the per-webhook signing secret
-- managed-identity-only sending from the Function to Service Bus
-- a separate Sandbox Group secret and GET-only egress transform for
-  `api.agentmail.to`
+GitHub Actions publishes the public amd64 image:
 
-The Function checks the inbox and sender, then sends only this reference:
-
-```json
-{
-  "version": 1,
-  "id": "deterministic UUID derived from event_id",
-  "type": "agentmail",
-  "scheduled_at": "2026-09-02T08:00:00Z",
-  "agentmail": {
-    "event_id": "evt_...",
-    "inbox_id": "agent@agentmail.to",
-    "message_id": "<message-id>",
-    "thread_id": "thd_..."
-  }
-}
+```text
+ghcr.io/tkubica12/aca-sandbox-copilot:latest
 ```
 
-The OnDemand worker wakes, fetches the canonical message through the
-secret-backed egress transform, rechecks the inbox and sender, and starts
-Copilot with the extracted newly authored text. The email body and attachments
-do not pass through Service Bus. Attachment metadata is shown to Copilot, but
-attachment content is not processed in this version. Successfully completed
-event IDs are deduplicated on the DataDisk, which compensates for Basic Service
-Bus not offering broker-side duplicate detection.
+`main` also publishes immutable UTC tags such as `20260902-101511`.
 
-AgentMail's API key never enters the Function, sandbox environment, command
-arguments, image, or DataDisk. `scripts/cleanup.py` deletes the managed webhook
-before removing Azure resources; it intentionally leaves the AgentMail inbox
-and allowlists in place.
+## Documentation
 
-## Connect
+- [Architecture and security](docs/architecture.md)
+- [Operations, configuration, and testing](docs/operations.md)
+
+## Cleanup
 
 ```console
-aca --resource-group rg-copilot-sandbox --region swedencentral sandbox shell --group copilot-sandbox-group --selector name=copilot-cli --command "tmux attach -t copilot"
+.venv/bin/python scripts/cleanup.py
 ```
 
-Detach with `Ctrl-b`, then `d`. Reconnect with the same command.
-
-## Clean up
-
-Run `.venv/bin/python scripts/cleanup.py` on macOS/Linux or
-`.venv\Scripts\python.exe scripts\cleanup.py` on Windows.
-
-`DataDisk` is single-writer, full-POSIX storage and fits durable agent
-workspaces. The sandbox uses a 20 GiB root disk, leaving disk-budget headroom
-for the 1 GiB data disk at 2000m CPU.
-
-## References
-
-- [ACA Sandboxes CLI quickstart](https://learn.microsoft.com/azure/container-apps/sandboxes-quickstart-cli)
-- [Sandbox disk images](https://sandboxes.azure.com/docs/sandboxes/disk-images)
-- [Sandbox volumes](https://sandboxes.azure.com/docs/sandboxes/volumes)
-- [Sandbox triggers](https://sandboxes.azure.com/docs/sandboxes/triggers)
-- [AgentMail webhooks](https://www.agentmail.to/docs/webhooks-overview)
-- [AgentMail allowlists](https://www.agentmail.to/docs/knowledge-base/allowlists-blocklists)
-- [Install GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
+On Windows, use `.venv\Scripts\python.exe`.
