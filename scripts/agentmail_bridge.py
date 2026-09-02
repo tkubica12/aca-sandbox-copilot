@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 import subprocess
 import tempfile
 import urllib.error
@@ -28,7 +29,10 @@ WEBHOOK_CLIENT_ID = "aca-sandbox-copilot-agentmail"
 
 
 def az_json(*args: str, subscription: str | None = None) -> Any:
-    command = ["az", *args, "--only-show-errors", "--output", "json"]
+    executable = shutil.which("az")
+    if not executable:
+        raise RuntimeError("Azure CLI executable was not found on PATH.")
+    command = [executable, *args, "--only-show-errors", "--output", "json"]
     if subscription:
         command.extend(("--subscription", subscription))
     completed = subprocess.run(
