@@ -130,8 +130,8 @@ def main() -> None:
                 "&& test -f /root/.copilot/skills/scheduler/SKILL.md "
                 "&& test -f /mnt/data/scheduler/runtime.json "
                 "&& test \"$(stat -c %a /mnt/data/scheduler/runtime.json)\" = 600 "
-                "&& test -f /root/.sandbox-identity.json "
-                "&& test \"$(stat -c %a /root/.sandbox-identity.json)\" = 600 "
+                "&& test -f /mnt/data/scheduler/identity.json "
+                "&& test \"$(stat -c %a /mnt/data/scheduler/identity.json)\" = 600 "
                 "&& tmux has-session -t copilot "
                 "&& pgrep -af '/opt/copilot-scheduler/worker.py' "
                 "&& curl -fsS http://127.0.0.1:8080/health",

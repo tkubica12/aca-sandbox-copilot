@@ -170,9 +170,11 @@ outside the sandbox and is injected only by the provider credential proxy.
 
 Disk restart currently drops the platform-managed identity environment. During
 deployment, its sandbox-scoped endpoint and header are captured without leaving
-the sandbox and stored in `/root/.sandbox-identity.json` with mode `0600`. The
-entrypoint reloads them after disk resume so scheduling and lifecycle operations
-continue to use managed identity. Recreating the sandbox generates a new file.
+the sandbox and stored in `/mnt/data/scheduler/identity.json` with mode `0600`.
+The entrypoint reloads them after disk resume so scheduling and lifecycle
+operations continue to use managed identity. The header is sensitive bootstrap
+material, although it is not an Azure access token. Recreating the sandbox
+generates a new file.
 
 ## Connect
 

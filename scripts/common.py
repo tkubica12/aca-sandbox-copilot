@@ -310,7 +310,7 @@ class AzureClients:
 
     @classmethod
     def create(cls, config: Config) -> "AzureClients":
-        credential = AzureCliCredential(process_timeout=30)
+        credential = AzureCliCredential(process_timeout=120)
         return cls(
             credential=credential,
             resources=ResourceManagementClient(credential, config.subscription_id),
@@ -731,7 +731,7 @@ keys = ("IDENTITY_ENDPOINT", "IDENTITY_HEADER")
 values = {key: os.environ[key] for key in keys if os.environ.get(key)}
 if set(values) != set(keys):
     raise RuntimeError("Sandbox managed identity environment is unavailable.")
-path = Path("/root/.sandbox-identity.json")
+path = Path("/mnt/data/scheduler/identity.json")
 path.write_text(json.dumps(values, indent=2), encoding="utf-8")
 path.chmod(0o600)
 """

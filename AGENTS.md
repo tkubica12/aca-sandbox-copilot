@@ -32,5 +32,5 @@
 - RG tag `SecurityControl=ignore` required here. Connector Service Bus auth needs local key.
 - Auto-suspend: 60s, disk mode. Disk resume reruns `/usr/local/bin/container-entrypoint`.
 - Disk restart env: `/mnt/data/scheduler/runtime.json`. Non-secret + `gho_placeholder` only.
-- MI restart env: `/root/.sandbox-identity.json`, 0600, captured internally. Never log it.
+- MI restart env: `/mnt/data/scheduler/identity.json`, 0600, sensitive. Never log it.
 - No guest busy/lease API. Worker disables/restores lifecycle through MI around each task.
