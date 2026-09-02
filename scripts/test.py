@@ -200,6 +200,8 @@ def main() -> None:
                 "&& tmux -V && test -x /usr/local/bin/schedule-task "
                 "&& test -x /usr/local/bin/sandbox-task-worker "
                 "&& test -f /root/.copilot/skills/scheduler/SKILL.md "
+                "&& grep -q 'task_type == \"agentmail\"' "
+                "/opt/copilot-scheduler/worker.py "
                 "&& test -f /mnt/data/scheduler/runtime.json "
                 "&& test \"$(stat -c %a /mnt/data/scheduler/runtime.json)\" = 600 "
                 "&& test -z \"${AGENTMAIL_API_KEY:-}\" "
