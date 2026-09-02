@@ -27,10 +27,10 @@
 - Sandbox Group system MI: Service Bus Data Sender + Receiver. Runtime uses `DefaultAzureCredential`.
 - Task types: `prompt` (`copilot --allow-all-tools -p`) or approved `.py`/`.sh` under `/mnt/data/tasks`.
 - Schedule CLI: `schedule-task`. Skill: `/root/.copilot/skills/scheduler/SKILL.md`.
-- Results: `/mnt/data/scheduler/logs`. Recurrence schedules next only after success.
+- Results: `/mnt/data/scheduler/logs`. Recurrence pre-schedules finite horizon.
 - Connector/API gaps: ports objectIds + connector children use preview REST.
 - RG tag `SecurityControl=ignore` required here. Connector Service Bus auth needs local key.
 - Auto-suspend: 60s, disk mode. Disk resume reruns `/usr/local/bin/container-entrypoint`.
 - Disk restart env: `/mnt/data/scheduler/runtime.json`. Non-secret + `gho_placeholder` only.
-- MI restart env: `/mnt/data/scheduler/identity.json`, 0600, sensitive. Never log it.
-- No guest busy/lease API. Worker disables/restores lifecycle through MI around each task.
+- Resume loses MI env. Worker needs no Azure auth; recurrence scheduled up front.
+- No guest busy/lease API. Active synchronous callback is task boundary.

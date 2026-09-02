@@ -7,7 +7,7 @@ import argparse
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from azure.identity import DefaultAzureCredential
@@ -34,7 +34,7 @@ def service_bus_settings() -> tuple[str, str]:
     return namespace, queue
 
 
-def schedule_task(task: dict[str, Any], enqueue_at: datetime) -> int:
+def schedule_tasks(tasks: list[tuple[dict[str, Any], datetime]]) -> list[int]:
     namespace, queue = service_bus_settings()
     credential = DefaultAzureCredential()
     try:
@@ -45,12 +45,17 @@ def schedule_task(task: dict[str, Any], enqueue_at: datetime) -> int:
             connection_verify=os.environ.get("SSL_CERT_FILE"),
         ) as client:
             with client.get_queue_sender(queue) as sender:
-                message = ServiceBusMessage(
-                    json.dumps(task, separators=(",", ":")),
-                    content_type="application/json",
-                    message_id=task["id"],
-                )
-                return sender.schedule_messages(message, enqueue_at)[0]
+                sequence_numbers = []
+                for task, enqueue_at in tasks:
+                    message = ServiceBusMessage(
+                        json.dumps(task, separators=(",", ":")),
+                        content_type="application/json",
+                        message_id=task["id"],
+                    )
+                    sequence_numbers.append(
+                        sender.schedule_messages(message, enqueue_at)[0]
+                    )
+                return sequence_numbers
     finally:
         credential.close()
 
@@ -63,6 +68,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--at", required=True, type=parse_utc)
         command.add_argument("--every", choices=("daily", "weekly"))
         command.add_argument("--interval", type=int, default=1)
+        command.add_argument("--occurrences", type=int)
         if task_type == "prompt":
             command.add_argument("--prompt", required=True)
         else:
@@ -75,24 +81,51 @@ def main() -> None:
     args = parser().parse_args()
     if args.interval < 1:
         raise SystemExit("--interval must be at least 1")
-    task: dict[str, Any] = {
-        "version": 1,
-        "id": str(uuid.uuid4()),
-        "type": args.type,
-        "scheduled_at": args.at.isoformat().replace("+00:00", "Z"),
-        "recurrence": (
-            {"frequency": args.every, "interval": args.interval}
-            if args.every
-            else None
-        ),
-    }
-    if args.type == "prompt":
-        task["prompt"] = args.prompt
-    else:
-        task["script"] = args.script
-        task["args"] = args.arg
-    sequence_number = schedule_task(task, args.at)
-    print(json.dumps({"task": task, "sequence_number": sequence_number}, indent=2))
+    if args.occurrences is not None and args.every is None:
+        raise SystemExit("--occurrences requires --every")
+    occurrences = args.occurrences or (52 if args.every else 1)
+    if not 1 <= occurrences <= 366:
+        raise SystemExit("--occurrences must be between 1 and 366")
+
+    series_id = str(uuid.uuid4()) if args.every else None
+    cadence_days = 7 if args.every == "weekly" else 1
+    scheduled: list[tuple[dict[str, Any], datetime]] = []
+    for index in range(occurrences):
+        enqueue_at = args.at + timedelta(days=index * cadence_days * args.interval)
+        task: dict[str, Any] = {
+            "version": 1,
+            "id": str(uuid.uuid4()),
+            "type": args.type,
+            "scheduled_at": enqueue_at.isoformat().replace("+00:00", "Z"),
+        }
+        if series_id:
+            task["series"] = {
+                "id": series_id,
+                "frequency": args.every,
+                "interval": args.interval,
+                "occurrence": index + 1,
+                "occurrences": occurrences,
+            }
+        if args.type == "prompt":
+            task["prompt"] = args.prompt
+        else:
+            task["script"] = args.script
+            task["args"] = args.arg
+        scheduled.append((task, enqueue_at))
+
+    sequence_numbers = schedule_tasks(scheduled)
+    print(
+        json.dumps(
+            {
+                "series_id": series_id,
+                "occurrences": occurrences,
+                "first_scheduled_at": scheduled[0][1].isoformat().replace("+00:00", "Z"),
+                "last_scheduled_at": scheduled[-1][1].isoformat().replace("+00:00", "Z"),
+                "sequence_numbers": sequence_numbers,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

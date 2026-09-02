@@ -722,20 +722,6 @@ def write_runtime_environment(
             "> /mnt/data/scheduler/runtime.json",
         ],
     )
-    identity_bootstrap = """
-import json
-import os
-from pathlib import Path
-
-keys = ("IDENTITY_ENDPOINT", "IDENTITY_HEADER")
-values = {key: os.environ[key] for key in keys if os.environ.get(key)}
-if set(values) != set(keys):
-    raise RuntimeError("Sandbox managed identity environment is unavailable.")
-path = Path("/mnt/data/scheduler/identity.json")
-path.write_text(json.dumps(values, indent=2), encoding="utf-8")
-path.chmod(0o600)
-"""
-    exec_checked(sandbox, ["python3", "-c", identity_bootstrap])
 
 
 def exec_checked(sandbox: Any, command: list[str]) -> str:

@@ -104,8 +104,8 @@ Run `.venv/bin/python scripts/test.py` on macOS/Linux or
 `.venv\Scripts\python.exe scripts\test.py` on Windows.
 
 The test checks the installed CLIs, tmux, worker authentication, Copilot,
-DataDisk access, script and prompt dispatch, managed-identity scheduling, and
-recurrence.
+DataDisk access, managed-identity scheduling, suspension, trigger-driven wake,
+and script and prompt dispatch.
 
 ## Schedule work
 
@@ -120,7 +120,8 @@ schedule-task script --at 2026-09-02T06:00:00Z \
   --script report.py --arg weekly
 
 schedule-task prompt --at 2026-09-07T06:00:00Z \
-  --every weekly --prompt "Prepare the weekly repository report"
+  --every weekly --occurrences 52 \
+  --prompt "Prepare the weekly repository report"
 ```
 
 Scripts must be `.py` or `.sh` files below `/mnt/data/tasks`. Arbitrary shell
@@ -136,15 +137,14 @@ The message schema is:
   "id": "UUID",
   "type": "prompt",
   "prompt": "Work to perform",
-  "scheduled_at": "2026-09-02T06:00:00Z",
-  "recurrence": null
+  "scheduled_at": "2026-09-02T06:00:00Z"
 }
 ```
 
 For a script, replace `prompt` with `"script": "report.py"` and
-`"args": ["weekly"]`. Recurrence is either `null` or
-`{"frequency":"daily|weekly","interval":1}`. A successful recurring task
-schedules its next occurrence.
+`"args": ["weekly"]`. Daily or weekly schedules create every occurrence up
+front, use unique task IDs, and default to 52 occurrences. Set
+`--occurrences` between 1 and 366 to choose a different finite horizon.
 
 Service Bus scheduled delivery is external to the sandbox. The Connector
 Namespace polls the queue, consumes due messages, and posts the connector
@@ -159,22 +159,20 @@ The worker port uses `activationMode=OnDemand`, so the Connector Namespace
 callback wakes a stopped sandbox before delivering the due task.
 
 The current preview exposes no guest heartbeat, lease, busy flag, or
-readiness-to-suspend API. Instead, the worker uses its Sandbox Group managed
-identity to disable auto-suspend before each task and restores the configured
-disk-mode timeout afterward.
+readiness-to-suspend API. Task execution remains inside the synchronous
+Connector Namespace HTTP callback. Configure the auto-suspend interval above
+the longest expected task duration; the default 60 seconds is intended only
+for the short end-to-end test.
 
 Non-secret runtime configuration and the provider-credential placeholder are
 persisted in `/mnt/data/scheduler/runtime.json` because disk-mode restart does
 not preserve the original process environment. The real GitHub token remains
 outside the sandbox and is injected only by the provider credential proxy.
 
-Disk restart currently drops the platform-managed identity environment. During
-deployment, its sandbox-scoped endpoint and header are captured without leaving
-the sandbox and stored in `/mnt/data/scheduler/identity.json` with mode `0600`.
-The entrypoint reloads them after disk resume so scheduling and lifecycle
-operations continue to use managed identity. The header is sensitive bootstrap
-material, although it is not an Azure access token. Recreating the sandbox
-generates a new file.
+Disk restart currently drops the platform-managed identity environment.
+Therefore the worker does not require Azure authentication after wake:
+recurring occurrences are scheduled up front while managed identity is
+available, and due messages contain everything needed to execute the task.
 
 ## Connect
 

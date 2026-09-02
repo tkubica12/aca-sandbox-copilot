@@ -5,30 +5,17 @@ from __future__ import annotations
 
 import base64
 import binascii
-from contextlib import contextmanager
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import traceback
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator
-
-from azure.containerapps.sandbox import (
-    AutoSuspendPolicy,
-    LifecyclePolicy,
-    SandboxGroupClient,
-    endpoint_for_region,
-)
-from azure.identity import DefaultAzureCredential
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from schedule import schedule_task
+from typing import Any
 
 DATA_ROOT = Path(os.environ.get("SCHEDULER_DATA_ROOT", "/mnt/data")).resolve()
 TASK_ROOT = DATA_ROOT / "tasks"
@@ -36,7 +23,6 @@ LOG_ROOT = DATA_ROOT / "scheduler" / "logs"
 RUN_LOCK = threading.Lock()
 RUNTIME_ENVIRONMENTS = (
     DATA_ROOT / "scheduler" / "runtime.json",
-    DATA_ROOT / "scheduler" / "identity.json",
 )
 
 
@@ -56,55 +42,6 @@ def load_runtime_environment() -> None:
             raise ValueError(f"{path} must contain string values.")
         for key, value in values.items():
             os.environ[key] = value
-
-
-@contextmanager
-def suspend_guard() -> Iterator[None]:
-    required = {
-        name: os.environ.get(name, "")
-        for name in (
-            "AZURE_SUBSCRIPTION_ID",
-            "AZURE_RESOURCE_GROUP",
-            "AZURE_LOCATION",
-            "SANDBOX_GROUP",
-            "SANDBOX_ID",
-            "SANDBOX_AUTO_SUSPEND_SECONDS",
-        )
-    }
-    missing = [name for name, value in required.items() if not value]
-    if missing:
-        raise RuntimeError(
-            f"Scheduler lifecycle configuration is missing: {', '.join(missing)}"
-        )
-    interval = int(required["SANDBOX_AUTO_SUSPEND_SECONDS"])
-    credential = DefaultAzureCredential()
-    group = SandboxGroupClient(
-        endpoint_for_region(required["AZURE_LOCATION"]),
-        credential,
-        subscription_id=required["AZURE_SUBSCRIPTION_ID"],
-        resource_group=required["AZURE_RESOURCE_GROUP"],
-        sandbox_group=required["SANDBOX_GROUP"],
-    )
-    sandbox = group.get_sandbox_client(required["SANDBOX_ID"])
-    try:
-        sandbox.set_lifecycle_policy(
-            LifecyclePolicy(auto_suspend=AutoSuspendPolicy(enabled=False))
-        )
-        yield
-    finally:
-        try:
-            sandbox.set_lifecycle_policy(
-                LifecyclePolicy(
-                    auto_suspend=AutoSuspendPolicy(
-                        enabled=True,
-                        interval=interval,
-                        mode="Disk",
-                    )
-                )
-            )
-        finally:
-            group.close()
-            credential.close()
 
 
 def get_case_insensitive(mapping: dict[str, Any], key: str) -> Any:
@@ -166,14 +103,6 @@ def validate_task(task: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Script args must be an array of strings.")
     else:
         raise ValueError("Task type must be prompt or script.")
-    recurrence = task.get("recurrence")
-    if recurrence is not None:
-        if not isinstance(recurrence, dict):
-            raise ValueError("Recurrence must be null or an object.")
-        if recurrence.get("frequency") not in {"daily", "weekly"}:
-            raise ValueError("Recurrence frequency must be daily or weekly.")
-        if not isinstance(recurrence.get("interval"), int) or recurrence["interval"] < 1:
-            raise ValueError("Recurrence interval must be a positive integer.")
     return task
 
 
@@ -189,23 +118,6 @@ def script_command(task: dict[str, Any]) -> list[str]:
     if script.suffix == ".sh":
         return ["bash", str(script), *task.get("args", [])]
     raise ValueError("Only .py and .sh scripts are allowed.")
-
-
-def next_occurrence(task: dict[str, Any]) -> datetime | None:
-    recurrence = task.get("recurrence")
-    if not recurrence:
-        return None
-    base_value = task.get("scheduled_at")
-    try:
-        base = datetime.fromisoformat(base_value.replace("Z", "+00:00"))
-    except (AttributeError, ValueError):
-        base = utc_now()
-    days = recurrence["interval"] * (7 if recurrence["frequency"] == "weekly" else 1)
-    candidate = base.astimezone(timezone.utc) + timedelta(days=days)
-    now = utc_now()
-    while candidate <= now:
-        candidate += timedelta(days=days)
-    return candidate
 
 
 def write_result(task_id: str, result: dict[str, Any]) -> None:
@@ -228,15 +140,14 @@ def execute_task(task: dict[str, Any]) -> dict[str, Any]:
         if task["type"] == "prompt"
         else script_command(task)
     )
-    with suspend_guard():
-        completed = subprocess.run(
-            command,
-            cwd=DATA_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=int(os.environ.get("TASK_TIMEOUT_SECONDS", "900")),
-            check=False,
-        )
+    completed = subprocess.run(
+        command,
+        cwd=DATA_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=int(os.environ.get("TASK_TIMEOUT_SECONDS", "900")),
+        check=False,
+    )
     result: dict[str, Any] = {
         "id": task["id"],
         "type": task["type"],
@@ -246,15 +157,6 @@ def execute_task(task: dict[str, Any]) -> dict[str, Any]:
         "stdout": completed.stdout,
         "stderr": completed.stderr,
     }
-    if completed.returncode == 0:
-        following = next_occurrence(task)
-        if following:
-            recurring_task = {
-                **task,
-                "scheduled_at": following.isoformat().replace("+00:00", "Z"),
-            }
-            result["next_sequence_number"] = schedule_task(recurring_task, following)
-            result["next_scheduled_at"] = recurring_task["scheduled_at"]
     write_result(task["id"], result)
     if completed.returncode != 0:
         raise RuntimeError(f"Task {task['id']} exited with {completed.returncode}.")

@@ -21,7 +21,9 @@ schedule-task script --at 2026-09-02T06:00:00Z --script report.py --arg weekly
 ```
 
 Add `--every daily` or `--every weekly`; use `--interval N` for every N days
-or weeks. Recurring work schedules its next occurrence only after success.
+or weeks and `--occurrences N` to choose the scheduling horizon. The default is
+52 occurrences. All occurrences are scheduled up front so they remain durable
+while the sandbox is stopped.
 Never schedule arbitrary shell text. Create a `.py` or `.sh` file below
 `/mnt/data/tasks`, then schedule its relative path and argument array.
 
