@@ -137,14 +137,14 @@ class AgentMailClient:
         url: str,
         function_key: str,
     ) -> str:
-        self.delete_managed_webhooks()
+        self.delete_managed_webhooks(inbox_id)
+        encoded_inbox = urllib.parse.quote(inbox_id, safe="")
         webhook = self.request(
             "POST",
-            "/webhooks",
+            f"/inboxes/{encoded_inbox}/webhooks",
             body={
                 "url": url,
                 "event_types": ["message.received"],
-                "inbox_ids": [inbox_id],
                 "client_id": WEBHOOK_CLIENT_ID,
                 "headers": {"x-functions-key": function_key},
             },
@@ -154,14 +154,16 @@ class AgentMailClient:
             raise RuntimeError("AgentMail did not return a webhook signing secret.")
         return secret
 
-    def delete_managed_webhooks(self) -> None:
+    def delete_managed_webhooks(self, inbox_id: str) -> None:
+        encoded_inbox = urllib.parse.quote(inbox_id, safe="")
+        path = f"/inboxes/{encoded_inbox}/webhooks"
         page_token: str | None = None
         webhook_ids: list[str] = []
         while True:
             query = {"limit": "100"}
             if page_token:
                 query["page_token"] = page_token
-            response = self.request("GET", "/webhooks", query=query)
+            response = self.request("GET", path, query=query)
             webhook_ids.extend(
                 webhook["webhook_id"]
                 for webhook in response.get("webhooks", [])
@@ -171,7 +173,7 @@ class AgentMailClient:
             if not page_token:
                 break
         for webhook_id in webhook_ids:
-            self.request("DELETE", f"/webhooks/{webhook_id}")
+            self.request("DELETE", f"{path}/{webhook_id}")
 
 
 def bridge_archive() -> Path:
@@ -373,4 +375,6 @@ def prepare_agentmail(config: Config, clients: AzureClients) -> Config:
 
 def cleanup_agentmail(config: Config) -> None:
     if config.agentmail_enabled:
-        AgentMailClient(config.agentmail_api_key).delete_managed_webhooks()
+        client = AgentMailClient(config.agentmail_api_key)
+        inbox_id = client.ensure_inbox(config)
+        client.delete_managed_webhooks(inbox_id)
