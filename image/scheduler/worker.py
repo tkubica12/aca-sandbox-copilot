@@ -34,7 +34,10 @@ DATA_ROOT = Path(os.environ.get("SCHEDULER_DATA_ROOT", "/mnt/data")).resolve()
 TASK_ROOT = DATA_ROOT / "tasks"
 LOG_ROOT = DATA_ROOT / "scheduler" / "logs"
 RUN_LOCK = threading.Lock()
-RUNTIME_ENVIRONMENT = DATA_ROOT / "scheduler" / "runtime.json"
+RUNTIME_ENVIRONMENTS = (
+    DATA_ROOT / "scheduler" / "runtime.json",
+    DATA_ROOT / "scheduler" / "identity.json",
+)
 
 
 def utc_now() -> datetime:
@@ -42,16 +45,17 @@ def utc_now() -> datetime:
 
 
 def load_runtime_environment() -> None:
-    if not RUNTIME_ENVIRONMENT.is_file():
-        return
-    values = json.loads(RUNTIME_ENVIRONMENT.read_text(encoding="utf-8"))
-    if not isinstance(values, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in values.items()
-    ):
-        raise ValueError("Scheduler runtime environment must contain string values.")
-    for key, value in values.items():
-        os.environ[key] = value
+    for path in RUNTIME_ENVIRONMENTS:
+        if not path.is_file():
+            continue
+        values = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(values, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in values.items()
+        ):
+            raise ValueError(f"{path} must contain string values.")
+        for key, value in values.items():
+            os.environ[key] = value
 
 
 @contextmanager
