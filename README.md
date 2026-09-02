@@ -158,13 +158,21 @@ image entrypoint again, restores the tmux session, and runs the HTTP worker.
 The worker port uses `activationMode=OnDemand`, so the Connector Namespace
 callback wakes a stopped sandbox before delivering the due task.
 
-Before each task, the worker uses the Sandbox Group managed identity to disable
-auto-suspend. It restores the configured disk-mode timeout after the command
-finishes, so long-running Copilot work is not interrupted. Non-secret runtime
-configuration and the provider-credential placeholder are persisted in
-`/mnt/data/scheduler/runtime.json` because disk-mode restart does not preserve
-the original process environment. The real GitHub token remains outside the
-sandbox and is injected only by the provider credential proxy.
+The current preview exposes no guest heartbeat, lease, busy flag, or
+readiness-to-suspend API. Instead, the worker uses its Sandbox Group managed
+identity to disable auto-suspend before each task and restores the configured
+disk-mode timeout afterward.
+
+Non-secret runtime configuration and the provider-credential placeholder are
+persisted in `/mnt/data/scheduler/runtime.json` because disk-mode restart does
+not preserve the original process environment. The real GitHub token remains
+outside the sandbox and is injected only by the provider credential proxy.
+
+Disk restart currently drops the platform-managed identity environment. During
+deployment, its sandbox-scoped endpoint and header are captured without leaving
+the sandbox and stored in `/root/.sandbox-identity.json` with mode `0600`. The
+entrypoint reloads them after disk resume so scheduling and lifecycle operations
+continue to use managed identity. Recreating the sandbox generates a new file.
 
 ## Connect
 

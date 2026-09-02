@@ -130,6 +130,8 @@ def main() -> None:
                 "&& test -f /root/.copilot/skills/scheduler/SKILL.md "
                 "&& test -f /mnt/data/scheduler/runtime.json "
                 "&& test \"$(stat -c %a /mnt/data/scheduler/runtime.json)\" = 600 "
+                "&& test -f /root/.sandbox-identity.json "
+                "&& test \"$(stat -c %a /root/.sandbox-identity.json)\" = 600 "
                 "&& tmux has-session -t copilot "
                 "&& pgrep -af '/opt/copilot-scheduler/worker.py' "
                 "&& curl -fsS http://127.0.0.1:8080/health",
@@ -255,6 +257,17 @@ Use the schedule-task command from the skill for both scheduled messages.
                 "-type f | wc -l)\" -eq 2",
             ],
         )
+        lifecycle = clients.group.get_sandbox(sandbox_id).lifecycle
+        auto_suspend = lifecycle.auto_suspend if lifecycle else None
+        if (
+            not auto_suspend
+            or not auto_suspend.enabled
+            or auto_suspend.interval != config.auto_suspend_seconds
+            or auto_suspend.mode != "Disk"
+        ):
+            raise RuntimeError(
+                f"Worker did not restore the auto-suspend policy: {lifecycle}."
+            )
         print("Verifying that Service Bus consumed both messages...")
         wait_for_queue(
             config,
