@@ -6,10 +6,14 @@ from __future__ import annotations
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
 from common import CONNECTOR_API_VERSION, AzureClients, Config
+from agentmail_bridge import cleanup_agentmail
 
 
 def main() -> None:
     config = Config.from_env()
+    if config.agentmail_enabled:
+        print("Deleting managed AgentMail webhook...")
+        cleanup_agentmail(config)
     with AzureClients.create(config) as clients:
         if not clients.resources.resource_groups.check_existence(config.resource_group):
             print(f"Resource group {config.resource_group} does not exist.")

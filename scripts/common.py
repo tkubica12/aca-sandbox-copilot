@@ -129,12 +129,38 @@ class Config:
     connector_connection: str
     connector_trigger: str
     worker_port: int
+    agentmail_api_key: str
+    agentmail_inbox_id: str
+    agentmail_username: str
+    agentmail_domain: str
+    agentmail_allowed_senders: tuple[str, ...]
+    agentmail_secret_name: str
+    agentmail_function_app: str
+    agentmail_storage_account: str
+    agentmail_max_body_chars: int
 
     @classmethod
     def from_env(cls, *, require_token: bool = False) -> "Config":
         load_env()
         subscription_id = current_subscription_id()
         location = env("AZURE_LOCATION", "swedencentral")
+        allowed_senders = tuple(
+            sorted(
+                {
+                    value.strip().casefold()
+                    for value in env("AGENTMAIL_ALLOWED_SENDERS").split(",")
+                    if value.strip()
+                }
+            )
+        )
+        if any(
+            sender.count("@") != 1 or any(char.isspace() for char in sender)
+            for sender in allowed_senders
+        ):
+            raise RuntimeError(
+                "AGENTMAIL_ALLOWED_SENDERS accepts comma-separated exact email "
+                "addresses only."
+            )
         config = cls(
             subscription_id=subscription_id,
             location=location,
@@ -164,13 +190,46 @@ class Config:
             connector_connection=env("CONNECTOR_CONNECTION", "servicebus"),
             connector_trigger=env("CONNECTOR_TRIGGER", "copilot-task-trigger"),
             worker_port=int(env("WORKER_PORT", "8080")),
+            agentmail_api_key=env("AGENTMAIL_API_KEY"),
+            agentmail_inbox_id=env("AGENTMAIL_INBOX_ID"),
+            agentmail_username=(
+                env("AGENTMAIL_USERNAME") or f"copilot-{subscription_id[:8]}"
+            ),
+            agentmail_domain=env("AGENTMAIL_DOMAIN") or "agentmail.to",
+            agentmail_allowed_senders=allowed_senders,
+            agentmail_secret_name=(
+                env("AGENTMAIL_SANDBOX_SECRET_NAME") or "agentmail-api-key"
+            ),
+            agentmail_function_app=(
+                env("AGENTMAIL_FUNCTION_APP")
+                or f"copilot-mail-{subscription_id[:8]}"
+            ),
+            agentmail_storage_account=(
+                env("AGENTMAIL_STORAGE_ACCOUNT")
+                or f"copilotmail{subscription_id[:8].replace('-', '')}"[:24]
+            ),
+            agentmail_max_body_chars=int(
+                env("AGENTMAIL_MAX_BODY_CHARS", "100000")
+            ),
         )
         if require_token and not config.token.startswith("github_pat_"):
             raise RuntimeError(
                 "COPILOT_GITHUB_TOKEN must be a fine-grained token beginning with "
                 "'github_pat_'."
             )
+        if config.agentmail_api_key and not config.agentmail_api_key.startswith("am_"):
+            raise RuntimeError("AGENTMAIL_API_KEY must begin with 'am_'.")
+        if config.agentmail_api_key and not config.agentmail_allowed_senders:
+            raise RuntimeError(
+                "AGENTMAIL_ALLOWED_SENDERS is required when AGENTMAIL_API_KEY is set."
+            )
+        if config.agentmail_max_body_chars < 1:
+            raise RuntimeError("AGENTMAIL_MAX_BODY_CHARS must be positive.")
         return config
+
+    @property
+    def agentmail_enabled(self) -> bool:
+        return bool(self.agentmail_api_key)
 
     @property
     def group_scope(self) -> str:
@@ -538,13 +597,45 @@ def matching_disk_images(config: Config, clients: AzureClients) -> list[Any]:
 
 
 def copilot_egress_policy(config: Config) -> EgressPolicy:
-    return EgressPolicy(
-        default_action="Allow",
-        traffic_inspection="Full",
-        rules=[
+    rules = [
+        EgressRule(
+            name=name,
+            match=EgressRuleMatch(host=host),
+            action=EgressRuleAction(
+                type="Transform",
+                headers=[
+                    EgressHeader(
+                        operation="Set",
+                        name="Authorization",
+                        value_ref=EgressHeaderValueRef(
+                            secret_ref=EgressSecretRef(
+                                secret_id=config.secret_name,
+                                secret_key="token",
+                                format="Bearer {value}",
+                            )
+                        ),
+                    )
+                ],
+            ),
+        )
+        for host, name in (
+            ("api.github.com", "github-copilot-pat"),
+            ("api.githubcopilot.com", "github-copilot-api-pat"),
+            (
+                "api.enterprise.githubcopilot.com",
+                "github-copilot-enterprise-pat",
+            ),
+        )
+    ]
+    if config.agentmail_enabled:
+        rules.append(
             EgressRule(
-                name=name,
-                match=EgressRuleMatch(host=host),
+                name="agentmail-api-key",
+                match=EgressRuleMatch(
+                    host="api.agentmail.to",
+                    path="/v0/inboxes/*",
+                    methods=["GET"],
+                ),
                 action=EgressRuleAction(
                     type="Transform",
                     headers=[
@@ -553,8 +644,8 @@ def copilot_egress_policy(config: Config) -> EgressPolicy:
                             name="Authorization",
                             value_ref=EgressHeaderValueRef(
                                 secret_ref=EgressSecretRef(
-                                    secret_id=config.secret_name,
-                                    secret_key="token",
+                                    secret_id=config.agentmail_secret_name,
+                                    secret_key="api-key",
                                     format="Bearer {value}",
                                 )
                             ),
@@ -562,16 +653,34 @@ def copilot_egress_policy(config: Config) -> EgressPolicy:
                     ],
                 ),
             )
-            for host, name in (
-                ("api.github.com", "github-copilot-pat"),
-                ("api.githubcopilot.com", "github-copilot-api-pat"),
-                (
-                    "api.enterprise.githubcopilot.com",
-                    "github-copilot-enterprise-pat",
-                ),
-            )
-        ],
+        )
+    return EgressPolicy(
+        default_action="Allow",
+        traffic_inspection="Full",
+        rules=rules,
     )
+
+
+def sandbox_environment(config: Config) -> dict[str, str]:
+    values = {
+        "SERVICE_BUS_NAMESPACE": (
+            f"{config.service_bus_namespace}.servicebus.windows.net"
+        ),
+        "SERVICE_BUS_QUEUE": config.service_bus_queue,
+        "WORKER_PORT": str(config.worker_port),
+        "COPILOT_GITHUB_TOKEN": "gho_placeholder",
+    }
+    if config.agentmail_enabled:
+        values.update(
+            {
+                "AGENTMAIL_INBOX_ID": config.agentmail_inbox_id,
+                "AGENTMAIL_ALLOWED_SENDERS": ",".join(
+                    config.agentmail_allowed_senders
+                ),
+                "AGENTMAIL_MAX_BODY_CHARS": str(config.agentmail_max_body_chars),
+            }
+        )
+    return values
 
 
 def create_sandbox(
@@ -591,14 +700,7 @@ def create_sandbox(
             },
             "lifecycle": {"autoSuspendPolicy": {"enabled": False}},
             "labels": {**PROJECT_LABELS, "name": config.sandbox_name},
-            "environment": {
-                "SERVICE_BUS_NAMESPACE": (
-                    f"{config.service_bus_namespace}.servicebus.windows.net"
-                ),
-                "SERVICE_BUS_QUEUE": config.service_bus_queue,
-                "WORKER_PORT": str(config.worker_port),
-                "COPILOT_GITHUB_TOKEN": "gho_placeholder",
-            },
+            "environment": sandbox_environment(config),
             "egressPolicy": egress_policy._to_dict(),
             "volumes": [
                 SandboxVolume(
@@ -642,14 +744,7 @@ def create_sandbox(
             )
         ],
         egress_policy=egress_policy,
-        environment={
-            "SERVICE_BUS_NAMESPACE": (
-                f"{config.service_bus_namespace}.servicebus.windows.net"
-            ),
-            "SERVICE_BUS_QUEUE": config.service_bus_queue,
-            "WORKER_PORT": str(config.worker_port),
-            "COPILOT_GITHUB_TOKEN": "gho_placeholder",
-        },
+        environment=sandbox_environment(config),
         entrypoint=["/usr/local/bin/container-entrypoint"],
     ).result()
 
@@ -674,6 +769,16 @@ def write_runtime_environment(
         "WORKER_PORT": str(config.worker_port),
         "COPILOT_GITHUB_TOKEN": "gho_placeholder",
     }
+    if config.agentmail_enabled:
+        values.update(
+            {
+                "AGENTMAIL_INBOX_ID": config.agentmail_inbox_id,
+                "AGENTMAIL_ALLOWED_SENDERS": ",".join(
+                    config.agentmail_allowed_senders
+                ),
+                "AGENTMAIL_MAX_BODY_CHARS": str(config.agentmail_max_body_chars),
+            }
+        )
     encoded = base64.b64encode(
         json.dumps(values, indent=2).encode("utf-8")
     ).decode("ascii")

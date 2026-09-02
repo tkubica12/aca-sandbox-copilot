@@ -27,6 +27,7 @@ from common import (
     wait_for_data_plane,
     write_runtime_environment,
 )
+from agentmail_bridge import configure_agentmail, prepare_agentmail
 
 
 def main() -> None:
@@ -144,6 +145,10 @@ def main() -> None:
                 "left blank later while the Sandbox Group secret exists."
             )
 
+        if config.agentmail_enabled:
+            print("Preparing AgentMail inbox and sender allowlists...")
+            config = prepare_agentmail(config, clients)
+
         for image in matching_disk_images(config, clients):
             print(f"Deleting previous disk image {image.id}...")
             clients.group.begin_delete_disk_image(image.id).result()
@@ -187,6 +192,11 @@ def main() -> None:
             connector_principal_id=connector_principal_id,
             service_bus_connection_string=connector_keys.primary_connection_string,
         )
+        if config.agentmail_enabled:
+            print("Deploying AgentMail Azure Function bridge...")
+            inbox_id, webhook_url = configure_agentmail(config, clients)
+            print(f"AgentMail inbox: {inbox_id}")
+            print(f"AgentMail webhook: {webhook_url}")
         print(f"Sandbox ready: {sandbox.sandbox_id}")
         print(f"Trigger callback: {callback_url}")
 

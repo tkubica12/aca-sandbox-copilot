@@ -84,6 +84,7 @@ Defaults create:
 - Basic Service Bus namespace and `copilot-tasks` queue
 - system-assigned Sandbox Group identity with Service Bus sender/receiver access
 - Connector Namespace trigger with an Entra-protected on-demand worker port
+- optional AgentMail inbox and Flex Consumption Function webhook bridge
 
 The resource group is tagged `SecurityControl=ignore`. In the tested corporate
 subscription this exempts the demo from the policy that otherwise forces
@@ -177,6 +178,63 @@ Therefore the worker does not require Azure authentication after wake:
 recurring occurrences are scheduled up front while managed identity is
 available, and due messages contain everything needed to execute the task.
 
+## Trigger work by AgentMail
+
+AgentMail integration is optional. Create an API key in the
+[AgentMail Console](https://console.agentmail.to/) under **API Keys**. The key
+starts with `am_` and is shown only once. Put it in the ignored `.env` file;
+do not paste it into source code or commit it:
+
+```text
+AGENTMAIL_API_KEY=am_...
+AGENTMAIL_ALLOWED_SENDERS=you@example.com,second-owner@example.com
+```
+
+`AGENTMAIL_ALLOWED_SENDERS` accepts exact addresses only. Deployment creates
+both inbox-scoped `receive` and `reply` allowlists. An existing inbox can be
+selected with `AGENTMAIL_INBOX_ID`; otherwise the deployment idempotently
+creates `<AGENTMAIL_USERNAME>@<AGENTMAIL_DOMAIN>`.
+
+With AgentMail configured, `scripts/deploy.py` also creates:
+
+- a Python Azure Function in Flex Consumption with no always-ready instances
+- a Function key supplied to AgentMail as the write-only `x-functions-key`
+  webhook header
+- Svix signature verification using the per-webhook signing secret
+- managed-identity-only sending from the Function to Service Bus
+- a separate Sandbox Group secret and GET-only egress transform for
+  `api.agentmail.to`
+
+The Function checks the inbox and sender, then sends only this reference:
+
+```json
+{
+  "version": 1,
+  "id": "deterministic UUID derived from event_id",
+  "type": "agentmail",
+  "scheduled_at": "2026-09-02T08:00:00Z",
+  "agentmail": {
+    "event_id": "evt_...",
+    "inbox_id": "agent@agentmail.to",
+    "message_id": "<message-id>",
+    "thread_id": "thd_..."
+  }
+}
+```
+
+The OnDemand worker wakes, fetches the canonical message through the
+secret-backed egress transform, rechecks the inbox and sender, and starts
+Copilot with the extracted newly authored text. The email body and attachments
+do not pass through Service Bus. Attachment metadata is shown to Copilot, but
+attachment content is not processed in this version. Successfully completed
+event IDs are deduplicated on the DataDisk, which compensates for Basic Service
+Bus not offering broker-side duplicate detection.
+
+AgentMail's API key never enters the Function, sandbox environment, command
+arguments, image, or DataDisk. `scripts/cleanup.py` deletes the managed webhook
+before removing Azure resources; it intentionally leaves the AgentMail inbox
+and allowlists in place.
+
 ## Connect
 
 ```console
@@ -200,4 +258,6 @@ for the 1 GiB data disk at 2000m CPU.
 - [Sandbox disk images](https://sandboxes.azure.com/docs/sandboxes/disk-images)
 - [Sandbox volumes](https://sandboxes.azure.com/docs/sandboxes/volumes)
 - [Sandbox triggers](https://sandboxes.azure.com/docs/sandboxes/triggers)
+- [AgentMail webhooks](https://www.agentmail.to/docs/webhooks-overview)
+- [AgentMail allowlists](https://www.agentmail.to/docs/knowledge-base/allowlists-blocklists)
 - [Install GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)

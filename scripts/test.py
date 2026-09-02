@@ -18,6 +18,7 @@ from common import (
     matching_disk_images,
     matching_sandboxes,
 )
+from agentmail_bridge import az_json
 
 
 def normalized_state(value: Any) -> str:
@@ -120,6 +121,16 @@ def main() -> None:
             )
         if clients.group.list_secret_keys(config.secret_name) != ["token"]:
             raise RuntimeError("Copilot secret must contain exactly the token key.")
+        if config.agentmail_enabled:
+            agentmail_secrets = [
+                secret
+                for secret in clients.group.list_secrets()
+                if secret.id == config.agentmail_secret_name
+            ]
+            if len(agentmail_secrets) != 1 or clients.group.list_secret_keys(
+                config.agentmail_secret_name
+            ) != ["api-key"]:
+                raise RuntimeError("AgentMail Sandbox Group secret is missing.")
 
         sandbox_id = sandboxes[0].id
         sandbox = clients.group.get_sandbox_client(sandbox_id)
@@ -138,6 +149,44 @@ def main() -> None:
             "api.enterprise.githubcopilot.com",
         }:
             raise RuntimeError("Copilot secret-backed egress transform is missing.")
+        if config.agentmail_enabled:
+            agentmail_rules = [
+                rule
+                for rule in egress_policy.rules
+                if rule.name == "agentmail-api-key"
+            ]
+            if (
+                len(agentmail_rules) != 1
+                or agentmail_rules[0].match.host != "api.agentmail.to"
+                or agentmail_rules[0].match.path != "/v0/inboxes/*"
+                or agentmail_rules[0].match.methods != ["GET"]
+            ):
+                raise RuntimeError("AgentMail secret-backed egress transform is missing.")
+            function = az_json(
+                "functionapp",
+                "show",
+                "--resource-group",
+                config.resource_group,
+                "--name",
+                config.agentmail_function_app,
+                subscription=config.subscription_id,
+            )
+            if not function.get("identity", {}).get("principalId"):
+                raise RuntimeError("AgentMail Function App identity is missing.")
+            webhook_url = (
+                f"https://{config.agentmail_function_app}.azurewebsites.net"
+                "/api/agentmail"
+            )
+            request = urllib.request.Request(webhook_url, data=b"{}", method="POST")
+            try:
+                urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as error:
+                if error.code not in {401, 403}:
+                    raise
+            else:
+                raise RuntimeError(
+                    "AgentMail Function unexpectedly allowed a request without its key."
+                )
 
         print("Checking image tools, packaged scheduler, skill, tmux, and worker...")
         exec_checked(
@@ -153,6 +202,8 @@ def main() -> None:
                 "&& test -f /root/.copilot/skills/scheduler/SKILL.md "
                 "&& test -f /mnt/data/scheduler/runtime.json "
                 "&& test \"$(stat -c %a /mnt/data/scheduler/runtime.json)\" = 600 "
+                "&& test -z \"${AGENTMAIL_API_KEY:-}\" "
+                "&& ! grep -q 'AGENTMAIL_API_KEY' /mnt/data/scheduler/runtime.json "
                 "&& tmux has-session -t copilot "
                 "&& pgrep -af '/opt/copilot-scheduler/worker.py' "
                 "&& curl -fsS http://127.0.0.1:8080/health",

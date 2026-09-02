@@ -25,7 +25,7 @@
 - Worker port: 8080, `OnDemand`, namespace MI object allowlist. Audience: `https://auth.adcproxy.io/`.
 - Connector Service Bus auth uses isolated Listen connection string. Sandbox never gets it.
 - Sandbox Group system MI: Service Bus Data Sender + Receiver. Runtime uses `DefaultAzureCredential`.
-- Task types: `prompt` (`copilot --allow-all-tools -p`) or approved `.py`/`.sh` under `/mnt/data/tasks`.
+- Task types: `prompt`, `script`, or `agentmail` reference fetched before Copilot starts.
 - Schedule CLI: `schedule-task`. Skill: `/root/.copilot/skills/scheduler/SKILL.md`.
 - Results: `/mnt/data/scheduler/logs`. Recurrence pre-schedules finite horizon.
 - Connector/API gaps: ports objectIds + connector children use preview REST.
@@ -33,5 +33,8 @@
 - Auto-suspend: 60s, disk mode. Disk resume reruns `/usr/local/bin/container-entrypoint`.
 - Disk restart env: `/mnt/data/scheduler/runtime.json`. Non-secret + `gho_placeholder` only.
 - Secret values never env/disk. Explicit egress transform survives Disk resume.
+- AgentMail: Function-key + Svix webhook -> Service Bus `agentmail` reference task.
+- AgentMail receive/reply exact-address allowlists are mirrored in Function and worker.
+- AgentMail API key: separate Sandbox Group secret, GET-only API egress transform.
 - Resume loses MI env. Worker needs no Azure auth; recurrence scheduled up front.
 - No guest busy/lease API. Active synchronous callback is task boundary.
