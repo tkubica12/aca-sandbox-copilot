@@ -15,8 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from azure.containerapps.sandbox import (
-    DATA_PLANE_API_VERSION,
     DATA_PLANE_SCOPE,
+    EgressHeader,
+    EgressHeaderValueRef,
+    EgressPolicy,
+    EgressRule,
+    EgressRuleAction,
+    EgressRuleMatch,
+    EgressSecretRef,
     SandboxGroupClient,
     SandboxGroupManagementClient,
     SandboxVolume,
@@ -108,7 +114,7 @@ class Config:
     sandbox_name: str
     disk_name: str
     volume_name: str
-    credential_name: str
+    secret_name: str
     image: str
     cpu: str
     memory: str
@@ -137,7 +143,7 @@ class Config:
             sandbox_name=env("SANDBOX_NAME", "copilot-cli"),
             disk_name=env("SANDBOX_DISK_NAME", "copilot-image"),
             volume_name=env("SANDBOX_VOLUME_NAME", "copilot-data"),
-            credential_name=env("SANDBOX_CREDENTIAL_NAME", "github-copilot"),
+            secret_name=env("SANDBOX_SECRET_NAME", "github-copilot-pat"),
             image=env(
                 "SANDBOX_IMAGE",
                 "ghcr.io/tkubica12/aca-sandbox-copilot:latest",
@@ -230,73 +236,6 @@ class ArmRestClient:
         return None if not content else json.loads(content)
 
 
-class ProviderCredentialClient:
-    """Data-plane provider credential operations missing from SDK 0.1.0b4."""
-
-    def __init__(self, config: Config, credential: AzureCliCredential) -> None:
-        self._endpoint = endpoint_for_region(config.location).rstrip("/")
-        self._path = (
-            f"/subscriptions/{config.subscription_id}/resourceGroups/{config.resource_group}"
-            f"/sandboxGroups/{config.sandbox_group}/connections"
-        )
-        policies = [
-            RequestIdPolicy(),
-            HeadersPolicy(),
-            UserAgentPolicy(sdk_moniker="aca-sandbox-copilot/1.0"),
-            ProxyPolicy(),
-            ContentDecodePolicy(),
-            RedirectPolicy(),
-            RetryPolicy(retry_on_status_codes=[403], retry_status=10),
-            BearerTokenCredentialPolicy(credential, DATA_PLANE_SCOPE),
-        ]
-        self._pipeline = Pipeline(RequestsTransport(), policies=policies)
-
-    def close(self) -> None:
-        self._pipeline.__exit__(None, None, None)
-
-    def _request(
-        self,
-        method: str,
-        path: str = "",
-        *,
-        body: dict[str, Any] | None = None,
-        force: bool = False,
-    ) -> Any:
-        params: dict[str, str] = {"api-version": DATA_PLANE_API_VERSION}
-        if force:
-            params["force"] = "true"
-        request_options: dict[str, Any] = {"params": params}
-        if body is not None:
-            request_options["json"] = body
-        request = HttpRequest(
-            method, f"{self._endpoint}{self._path}{path}", **request_options
-        )
-        response = self._pipeline.run(request).http_response
-        if response.status_code >= 400:
-            raise HttpResponseError(response=response)
-        if response.status_code == 204:
-            return None
-        return response.json()
-
-    def list(self) -> list[dict[str, Any]]:
-        result = self._request("GET")
-        return result if isinstance(result, list) else result.get("value", [])
-
-    def create_github_copilot(self, name: str, token: str) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            body={
-                "name": name,
-                "parameterValueSetName": "pat",
-                "parameterValueSetValues": {"token": token},
-                "type": "github-copilot",
-            },
-        )
-
-    def delete(self, credential_id: str) -> None:
-        self._request("DELETE", f"/{credential_id}", force=True)
-
-
 @dataclass
 class AzureClients:
     credential: AzureCliCredential
@@ -305,7 +244,6 @@ class AzureClients:
     servicebus: ServiceBusManagementClient
     groups: SandboxGroupManagementClient
     group: SandboxGroupClient
-    connections: ProviderCredentialClient
     arm: ArmRestClient
 
     @classmethod
@@ -332,13 +270,11 @@ class AzureClients:
                 resource_group=config.resource_group,
                 sandbox_group=config.sandbox_group,
             ),
-            connections=ProviderCredentialClient(config, credential),
             arm=ArmRestClient(credential),
         )
 
     def close(self) -> None:
         self.arm.close()
-        self.connections.close()
         self.group.close()
         self.groups.close()
         self.authorization.close()
@@ -601,14 +537,41 @@ def matching_disk_images(config: Config, clients: AzureClients) -> list[Any]:
     ]
 
 
-def matching_credentials(
-    config: Config, clients: AzureClients
-) -> list[dict[str, Any]]:
-    return [
-        item
-        for item in clients.connections.list()
-        if item.get("name") == config.credential_name
-    ]
+def copilot_egress_policy(config: Config) -> EgressPolicy:
+    return EgressPolicy(
+        default_action="Allow",
+        traffic_inspection="Full",
+        rules=[
+            EgressRule(
+                name=name,
+                match=EgressRuleMatch(host=host),
+                action=EgressRuleAction(
+                    type="Transform",
+                    headers=[
+                        EgressHeader(
+                            operation="Set",
+                            name="Authorization",
+                            value_ref=EgressHeaderValueRef(
+                                secret_ref=EgressSecretRef(
+                                    secret_id=config.secret_name,
+                                    secret_key="token",
+                                    format="Bearer {value}",
+                                )
+                            ),
+                        )
+                    ],
+                ),
+            )
+            for host, name in (
+                ("api.github.com", "github-copilot-pat"),
+                ("api.githubcopilot.com", "github-copilot-api-pat"),
+                (
+                    "api.enterprise.githubcopilot.com",
+                    "github-copilot-enterprise-pat",
+                ),
+            )
+        ],
+    )
 
 
 def create_sandbox(
@@ -616,8 +579,8 @@ def create_sandbox(
     clients: AzureClients,
     *,
     disk_id: str,
-    credential_id: str,
 ):
+    egress_policy = copilot_egress_policy(config)
     if config.auto_suspend_seconds == 0:
         body = {
             "sourcesRef": {"diskImage": {"id": disk_id}},
@@ -634,8 +597,9 @@ def create_sandbox(
                 ),
                 "SERVICE_BUS_QUEUE": config.service_bus_queue,
                 "WORKER_PORT": str(config.worker_port),
+                "COPILOT_GITHUB_TOKEN": "gho_placeholder",
             },
-            "connections": [credential_id],
+            "egressPolicy": egress_policy._to_dict(),
             "volumes": [
                 SandboxVolume(
                     volume_name=config.volume_name,
@@ -677,13 +641,14 @@ def create_sandbox(
                 read_only=False,
             )
         ],
-        connections=[credential_id],
+        egress_policy=egress_policy,
         environment={
             "SERVICE_BUS_NAMESPACE": (
                 f"{config.service_bus_namespace}.servicebus.windows.net"
             ),
             "SERVICE_BUS_QUEUE": config.service_bus_queue,
             "WORKER_PORT": str(config.worker_port),
+            "COPILOT_GITHUB_TOKEN": "gho_placeholder",
         },
         entrypoint=["/usr/local/bin/container-entrypoint"],
     ).result()

@@ -15,7 +15,6 @@ from common import (
     AzureClients,
     Config,
     exec_checked,
-    matching_credentials,
     matching_disk_images,
     matching_sandboxes,
 )
@@ -105,16 +104,40 @@ def main() -> None:
     with AzureClients.create(config) as clients:
         sandboxes = matching_sandboxes(config, clients)
         images = matching_disk_images(config, clients)
-        credentials = matching_credentials(config, clients)
-        if len(sandboxes) != 1 or len(images) != 1 or len(credentials) != 1:
+        copilot_secrets = [
+            secret
+            for secret in clients.group.list_secrets()
+            if secret.id == config.secret_name
+        ]
+        if (
+            len(sandboxes) != 1
+            or len(images) != 1
+            or len(copilot_secrets) != 1
+        ):
             raise RuntimeError(
-                "Expected exactly one project sandbox, disk image, and credential. "
+                "Expected exactly one project sandbox, disk image, and Copilot secret. "
                 "Run scripts/deploy.py first."
             )
+        if clients.group.list_secret_keys(config.secret_name) != ["token"]:
+            raise RuntimeError("Copilot secret must contain exactly the token key.")
 
         sandbox_id = sandboxes[0].id
         sandbox = clients.group.get_sandbox_client(sandbox_id)
         sandbox.ensure_running()
+        egress_policy = sandbox.get_egress_policy()
+        copilot_hosts = {
+            rule.match.host
+            for rule in egress_policy.rules
+            if rule.name
+            and rule.name.startswith("github-copilot-")
+            and rule.match
+        }
+        if copilot_hosts != {
+            "api.github.com",
+            "api.githubcopilot.com",
+            "api.enterprise.githubcopilot.com",
+        }:
+            raise RuntimeError("Copilot secret-backed egress transform is missing.")
 
         print("Checking image tools, packaged scheduler, skill, tmux, and worker...")
         exec_checked(

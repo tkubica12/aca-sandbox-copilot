@@ -22,7 +22,6 @@ from common import (
     ensure_data_owner,
     ensure_role_assignment,
     identity_principal_id,
-    matching_credentials,
     matching_disk_images,
     matching_sandboxes,
     wait_for_data_plane,
@@ -125,16 +124,25 @@ def main() -> None:
             print(f"Deleting previous sandbox {sandbox.id}...")
             clients.group.get_sandbox_client(sandbox.id).begin_delete().result()
 
-        existing_credentials = matching_credentials(config, clients)
+        existing_secrets = {secret.id for secret in clients.group.list_secrets()}
         if config.token:
             if not config.token.startswith("github_pat_"):
                 raise RuntimeError(
                     "COPILOT_GITHUB_TOKEN must begin with 'github_pat_'."
                 )
-            for credential in existing_credentials:
-                print(f"Deleting previous credential {credential['id']}...")
-                clients.connections.delete(credential["id"])
-            existing_credentials = []
+            print("Creating GitHub Copilot Sandbox Group secret...")
+            clients.group.upsert_secret(
+                config.secret_name,
+                {"token": config.token},
+            )
+        elif (
+            config.secret_name not in existing_secrets
+            or "token" not in clients.group.list_secret_keys(config.secret_name)
+        ):
+            raise RuntimeError(
+                "Set COPILOT_GITHUB_TOKEN for the initial deployment. It may be "
+                "left blank later while the Sandbox Group secret exists."
+            )
 
         for image in matching_disk_images(config, clients):
             print(f"Deleting previous disk image {image.id}...")
@@ -161,26 +169,11 @@ def main() -> None:
             entrypoint=["/usr/local/bin/container-entrypoint"],
         ).result()
 
-        if config.token:
-            print("Creating GitHub Copilot provider credential...")
-            provider_credential = clients.connections.create_github_copilot(
-                config.credential_name, config.token
-            )
-        elif len(existing_credentials) == 1:
-            print("Reusing existing GitHub Copilot provider credential...")
-            provider_credential = existing_credentials[0]
-        else:
-            raise RuntimeError(
-                "Set COPILOT_GITHUB_TOKEN for the initial deployment. It may be "
-                "left blank on later deployments while one matching credential exists."
-            )
-
         print(f"Creating sandbox {config.sandbox_name}...")
         sandbox = create_sandbox(
             config,
             clients,
             disk_id=image.id,
-            credential_id=provider_credential["id"],
         )
         write_runtime_environment(
             config,

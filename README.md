@@ -80,7 +80,7 @@ Defaults create:
 - sandbox group `copilot-sandbox-group`
 - public custom disk from `ghcr.io/tkubica12/aca-sandbox-copilot:latest`
 - 1 GiB persistent DataDisk mounted at `/mnt/data`
-- sandbox `copilot-cli` with the GitHub Copilot credential attached
+- sandbox `copilot-cli` with secret-backed GitHub authentication
 - Basic Service Bus namespace and `copilot-tasks` queue
 - system-assigned Sandbox Group identity with Service Bus sender/receiver access
 - Connector Namespace trigger with an Entra-protected on-demand worker port
@@ -164,10 +164,13 @@ Connector Namespace HTTP callback. Configure the auto-suspend interval above
 the longest expected task duration; the default 60 seconds is intended only
 for the short end-to-end test.
 
-Non-secret runtime configuration and the provider-credential placeholder are
+Non-secret runtime configuration and the Copilot token placeholder are
 persisted in `/mnt/data/scheduler/runtime.json` because disk-mode restart does
-not preserve the original process environment. The real GitHub token remains
-outside the sandbox and is injected only by the provider credential proxy.
+not preserve the original process environment. The real GitHub token is stored
+as a Sandbox Group secret and an egress header transform injects it only into
+requests to the GitHub and GitHub Copilot API hosts used by the CLI. The PAT is
+never placed in process environment, command arguments, the image, or the
+DataDisk. This explicit egress policy survives disk-mode suspend and resume.
 
 Disk restart currently drops the platform-managed identity environment.
 Therefore the worker does not require Azure authentication after wake:

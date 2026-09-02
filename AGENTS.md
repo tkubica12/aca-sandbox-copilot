@@ -13,7 +13,7 @@
 - CI: `.github/workflows/image.yml`. PR builds. Main/manual pushes GHCR.
 - Image tags: `latest` + UTC `YYYYMMDD-HHmmss`.
 - Deploy/test/cleanup: Python SDK scripts. Cross-platform. `aca` only for interactive shell.
-- Credential CRUD absent in SDK b4. Minimal data-plane REST. Attach credential ID via SDK.
+- PAT: Sandbox Group secret + GitHub/Copilot API Authorization transforms.
 - Config: ignored `.env`; tracked `.env.sample`. PAT key `COPILOT_GITHUB_TOKEN`.
 - Default location: `swedencentral`.
 - Docs source: `sandboxes.azure.com/docs`. Product preview; CLI may drift.
@@ -32,5 +32,6 @@
 - RG tag `SecurityControl=ignore` required here. Connector Service Bus auth needs local key.
 - Auto-suspend: 60s, disk mode. Disk resume reruns `/usr/local/bin/container-entrypoint`.
 - Disk restart env: `/mnt/data/scheduler/runtime.json`. Non-secret + `gho_placeholder` only.
+- Secret values never env/disk. Explicit egress transform survives Disk resume.
 - Resume loses MI env. Worker needs no Azure auth; recurrence scheduled up front.
 - No guest busy/lease API. Active synchronous callback is task boundary.
