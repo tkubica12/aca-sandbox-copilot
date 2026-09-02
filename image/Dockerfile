@@ -81,6 +81,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip python3-venv \
+    && python3 -m pip install --no-cache-dir \
+        azure-identity==1.25.3 \
+        azure-servicebus==7.14.3 \
+        websocket-client==1.8.0 \
     && ln -s /usr/bin/python3 /usr/local/bin/python \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && curl -LsSf https://astral.sh/uv/install.sh | sh \
@@ -99,8 +103,13 @@ COPY ensure-tmux.sh /usr/local/bin/ensure-tmux
 COPY entrypoint.sh /usr/local/bin/container-entrypoint
 COPY copilot-tmux.service /etc/systemd/system/copilot-tmux.service
 COPY tmux-profile.sh /etc/profile.d/copilot-tmux.sh
+COPY scheduler /opt/copilot-scheduler
+COPY skills/scheduler /root/.copilot/skills/scheduler
 
 RUN chmod +x /usr/local/bin/ensure-tmux /usr/local/bin/container-entrypoint \
+    && chmod +x /opt/copilot-scheduler/worker.py /opt/copilot-scheduler/schedule.py \
+    && ln -s /opt/copilot-scheduler/worker.py /usr/local/bin/sandbox-task-worker \
+    && ln -s /opt/copilot-scheduler/schedule.py /usr/local/bin/schedule-task \
     && ln -s /etc/systemd/system/copilot-tmux.service \
         /etc/systemd/system/multi-user.target.wants/copilot-tmux.service \
     && mkdir -p /mnt/data \

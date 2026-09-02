@@ -39,10 +39,17 @@ from azure.core.rest import HttpRequest
 from azure.identity import AzureCliCredential
 from azure.mgmt.authorization import AuthorizationManagementClient
 from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.resource.resources.models import GenericResource
+from azure.mgmt.servicebus import ServiceBusManagementClient
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / ".env"
 DATA_OWNER_ROLE_ID = "c24cf47c-5077-412d-a19c-45202126392c"
+SERVICE_BUS_SENDER_ROLE_ID = "69a216fc-b8fb-44d8-bc22-1f3c2cd27a39"
+SERVICE_BUS_RECEIVER_ROLE_ID = "4f6d3b9b-027b-4f4c-9142-0e5a2a2247e0"
+CONNECTOR_API_VERSION = "2026-05-01-preview"
+SANDBOX_API_VERSION = "2026-02-01-preview"
+ADC_PROXY_AUDIENCE = "https://auth.adcproxy.io/"
 PROJECT_LABELS = {"managed-by": "aca-sandbox-copilot"}
 
 
@@ -109,13 +116,22 @@ class Config:
     data_disk_size: str
     auto_suspend_seconds: int
     token: str
+    service_bus_namespace: str
+    service_bus_queue: str
+    connector_namespace: str
+    connector_location: str
+    connector_connection: str
+    connector_trigger: str
+    worker_port: int
 
     @classmethod
     def from_env(cls, *, require_token: bool = False) -> "Config":
         load_env()
+        subscription_id = current_subscription_id()
+        location = env("AZURE_LOCATION", "swedencentral")
         config = cls(
-            subscription_id=current_subscription_id(),
-            location=env("AZURE_LOCATION", "swedencentral"),
+            subscription_id=subscription_id,
+            location=location,
             resource_group=env("AZURE_RESOURCE_GROUP", "rg-copilot-sandbox"),
             sandbox_group=env("SANDBOX_GROUP", "copilot-sandbox-group"),
             sandbox_name=env("SANDBOX_NAME", "copilot-cli"),
@@ -130,8 +146,18 @@ class Config:
             memory=env("SANDBOX_MEMORY", "4096Mi"),
             root_disk_size=env("SANDBOX_ROOT_DISK", "20Gi"),
             data_disk_size=env("SANDBOX_VOLUME_SIZE", "1Gi"),
-            auto_suspend_seconds=int(env("SANDBOX_AUTO_SUSPEND_SECONDS", "600")),
+            auto_suspend_seconds=int(env("SANDBOX_AUTO_SUSPEND_SECONDS", "60")),
             token=env("COPILOT_GITHUB_TOKEN", required=require_token),
+            service_bus_namespace=(
+                env("SERVICE_BUS_NAMESPACE")
+                or f"copilot-sbx-{subscription_id[:8]}"
+            ),
+            service_bus_queue=env("SERVICE_BUS_QUEUE", "copilot-tasks"),
+            connector_namespace=env("CONNECTOR_NAMESPACE", "copilot-scheduler"),
+            connector_location=env("CONNECTOR_LOCATION") or location,
+            connector_connection=env("CONNECTOR_CONNECTION", "servicebus"),
+            connector_trigger=env("CONNECTOR_TRIGGER", "copilot-task-trigger"),
+            worker_port=int(env("WORKER_PORT", "8080")),
         )
         if require_token and not config.token.startswith("github_pat_"):
             raise RuntimeError(
@@ -146,6 +172,62 @@ class Config:
             f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
             f"/providers/Microsoft.App/sandboxGroups/{self.sandbox_group}"
         )
+
+    @property
+    def service_bus_scope(self) -> str:
+        return (
+            f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
+            f"/providers/Microsoft.ServiceBus/namespaces/{self.service_bus_namespace}"
+        )
+
+    @property
+    def connector_scope(self) -> str:
+        return (
+            f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
+            f"/providers/Microsoft.Web/connectorGateways/{self.connector_namespace}"
+        )
+
+
+class ArmRestClient:
+    """Small ARM client for Connector Namespace preview resources."""
+
+    def __init__(self, credential: AzureCliCredential) -> None:
+        policies = [
+            RequestIdPolicy(),
+            HeadersPolicy(),
+            UserAgentPolicy(sdk_moniker="aca-sandbox-copilot/1.0"),
+            ProxyPolicy(),
+            ContentDecodePolicy(),
+            RedirectPolicy(),
+            RetryPolicy(),
+            BearerTokenCredentialPolicy(
+                credential, "https://management.azure.com/.default"
+            ),
+        ]
+        self._pipeline = Pipeline(RequestsTransport(), policies=policies)
+
+    def close(self) -> None:
+        self._pipeline.__exit__(None, None, None)
+
+    def request(
+        self,
+        method: str,
+        resource_id: str,
+        api_version: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        options: dict[str, Any] = {"params": {"api-version": api_version}}
+        if body is not None:
+            options["json"] = body
+        request = HttpRequest(
+            method, f"https://management.azure.com{resource_id}", **options
+        )
+        response = self._pipeline.run(request).http_response
+        if response.status_code >= 400:
+            raise HttpResponseError(response=response)
+        content = response.text()
+        return None if not content else json.loads(content)
 
 
 class ProviderCredentialClient:
@@ -220,17 +302,22 @@ class AzureClients:
     credential: AzureCliCredential
     resources: ResourceManagementClient
     authorization: AuthorizationManagementClient
+    servicebus: ServiceBusManagementClient
     groups: SandboxGroupManagementClient
     group: SandboxGroupClient
     connections: ProviderCredentialClient
+    arm: ArmRestClient
 
     @classmethod
     def create(cls, config: Config) -> "AzureClients":
-        credential = AzureCliCredential()
+        credential = AzureCliCredential(process_timeout=30)
         return cls(
             credential=credential,
             resources=ResourceManagementClient(credential, config.subscription_id),
             authorization=AuthorizationManagementClient(
+                credential, config.subscription_id
+            ),
+            servicebus=ServiceBusManagementClient(
                 credential, config.subscription_id
             ),
             groups=SandboxGroupManagementClient(
@@ -246,13 +333,16 @@ class AzureClients:
                 sandbox_group=config.sandbox_group,
             ),
             connections=ProviderCredentialClient(config, credential),
+            arm=ArmRestClient(credential),
         )
 
     def close(self) -> None:
+        self.arm.close()
         self.connections.close()
         self.group.close()
         self.groups.close()
         self.authorization.close()
+        self.servicebus.close()
         self.resources.close()
         self.credential.close()
 
@@ -273,29 +363,36 @@ def token_claim(token: str, name: str) -> str:
     return str(value)
 
 
-def ensure_data_owner(config: Config, clients: AzureClients) -> None:
-    access_token = clients.credential.get_token(
-        "https://management.azure.com/.default"
-    ).token
-    principal_id = token_claim(access_token, "oid")
-    principal_type = (
-        "ServicePrincipal"
-        if token_claim(access_token, "idtyp").lower() == "app"
-        else "User"
+def identity_principal_id(identity: Any) -> str:
+    value = (
+        identity.get("principalId")
+        if isinstance(identity, dict)
+        else getattr(identity, "principal_id", None)
     )
+    if not value:
+        raise RuntimeError("Azure resource has no system identity principal ID.")
+    return str(value)
+
+
+def ensure_role_assignment(
+    config: Config,
+    clients: AzureClients,
+    *,
+    scope: str,
+    principal_id: str,
+    role_id: str,
+    principal_type: str,
+) -> None:
     role_definition_id = (
         f"/subscriptions/{config.subscription_id}/providers/Microsoft.Authorization"
-        f"/roleDefinitions/{DATA_OWNER_ROLE_ID}"
+        f"/roleDefinitions/{role_id}"
     )
     assignment_id = str(
-        uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"{config.group_scope}:{principal_id}:{DATA_OWNER_ROLE_ID}",
-        )
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{scope}:{principal_id}:{role_id}")
     )
     try:
         clients.authorization.role_assignments.create(
-            config.group_scope,
+            scope,
             assignment_id,
             {
                 "role_definition_id": role_definition_id,
@@ -306,6 +403,172 @@ def ensure_data_owner(config: Config, clients: AzureClients) -> None:
     except HttpResponseError as error:
         if error.status_code != 409:
             raise
+
+
+def ensure_data_owner(config: Config, clients: AzureClients) -> None:
+    access_token = clients.credential.get_token(
+        "https://management.azure.com/.default"
+    ).token
+    principal_id = token_claim(access_token, "oid")
+    principal_type = (
+        "ServicePrincipal"
+        if token_claim(access_token, "idtyp").lower() == "app"
+        else "User"
+    )
+    ensure_role_assignment(
+        config,
+        clients,
+        scope=config.group_scope,
+        principal_id=principal_id,
+        role_id=DATA_OWNER_ROLE_ID,
+        principal_type=principal_type,
+    )
+
+
+def create_connector_namespace(config: Config, clients: AzureClients) -> str:
+    gateway = clients.resources.resources.begin_create_or_update_by_id(
+        config.connector_scope,
+        CONNECTOR_API_VERSION,
+        GenericResource(
+            location=config.connector_location,
+            tags=PROJECT_LABELS,
+            identity={"type": "SystemAssigned"},
+            properties={},
+        ),
+    ).result()
+    return identity_principal_id(gateway.identity)
+
+
+def configure_connector(
+    config: Config,
+    clients: AzureClients,
+    *,
+    sandbox_id: str,
+    connector_principal_id: str,
+    service_bus_connection_string: str,
+) -> str:
+    connection_scope = (
+        f"{config.connector_scope}/connections/{config.connector_connection}"
+    )
+    trigger_scope = f"{config.connector_scope}/triggerConfigs/{config.connector_trigger}"
+    for resource_scope in (trigger_scope, connection_scope):
+        try:
+            clients.arm.request(
+                "DELETE", resource_scope, CONNECTOR_API_VERSION
+            )
+        except HttpResponseError as error:
+            if error.status_code != 404:
+                raise
+    clients.arm.request(
+        "PUT",
+        connection_scope,
+        CONNECTOR_API_VERSION,
+        body={
+            "properties": {
+                "displayName": "Copilot task queue",
+                "connectorName": "servicebus",
+                "parameterValues": {
+                    "connectionString": service_bus_connection_string
+                },
+            }
+        },
+    )
+    callback_url = (
+        f"https://{sandbox_id}--{config.worker_port}."
+        f"{config.location}.adcproxy.io"
+    )
+    clients.arm.request(
+        "PUT",
+        trigger_scope,
+        CONNECTOR_API_VERSION,
+        body={
+            "properties": {
+                "state": "Enabled",
+                "description": "Dispatch scheduled Service Bus tasks to Copilot Sandbox.",
+                "connectionDetails": {
+                    "connectorName": "servicebus",
+                    "connectionName": config.connector_connection,
+                },
+                "operationName": "GetMessagesFromQueue",
+                "parameters": [
+                    {"name": "queueName", "value": config.service_bus_queue},
+                    {"name": "maxMessageCount", "value": "1"},
+                    {"name": "queueType", "value": "Main"},
+                ],
+                "notificationDetails": {
+                    "callbackUrl": callback_url,
+                    "httpMethod": "POST",
+                    "body": "@triggerBody()",
+                    "authentication": {
+                        "type": "ManagedServiceIdentity",
+                        "audience": ADC_PROXY_AUDIENCE,
+                    },
+                },
+                "metadata": {
+                    "sandboxGroupName": config.sandbox_group,
+                    "sandboxId": sandbox_id,
+                    "recurrenceFrequency": "Second",
+                    "recurrenceInterval": "10",
+                },
+            }
+        },
+    )
+    register_worker_port(
+        config,
+        clients,
+        sandbox_id=sandbox_id,
+        connector_principal_id=connector_principal_id,
+    )
+    return callback_url
+
+
+def register_worker_port(
+    config: Config,
+    clients: AzureClients,
+    *,
+    sandbox_id: str,
+    connector_principal_id: str,
+) -> None:
+    endpoint = endpoint_for_region(config.location).rstrip("/")
+    resource = (
+        f"/subscriptions/{config.subscription_id}/resourceGroups/{config.resource_group}"
+        f"/sandboxGroups/{config.sandbox_group}/sandboxes/{sandbox_id}/ports"
+    )
+    token = clients.credential.get_token(DATA_PLANE_SCOPE).token
+    tenant_id = token_claim(
+        clients.credential.get_token("https://management.azure.com/.default").token,
+        "tid",
+    )
+    request = HttpRequest(
+        "PUT",
+        f"{endpoint}{resource}",
+        params={"api-version": SANDBOX_API_VERSION},
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "ports": [
+                {
+                    "port": config.worker_port,
+                    "url": (
+                        f"https://{sandbox_id}--{config.worker_port}."
+                        f"{config.location}.adcproxy.io"
+                    ),
+                    "auth": {
+                        "anonymous": False,
+                        "entraId": {
+                            "enabled": True,
+                            "objectIds": [connector_principal_id],
+                            "tenantIds": [tenant_id],
+                        },
+                    },
+                    "activationMode": "OnDemand",
+                    "protocol": "Http",
+                }
+            ]
+        },
+    )
+    response = RequestsTransport().send(request)
+    if response.status_code >= 400:
+        raise HttpResponseError(response=response)
 
 
 def wait_for_data_plane(clients: AzureClients, timeout: int = 180) -> None:
@@ -355,6 +618,49 @@ def create_sandbox(
     disk_id: str,
     credential_id: str,
 ):
+    if config.auto_suspend_seconds == 0:
+        body = {
+            "sourcesRef": {"diskImage": {"id": disk_id}},
+            "resources": {
+                "cpu": config.cpu,
+                "memory": config.memory,
+                "disk": config.root_disk_size,
+            },
+            "lifecycle": {"autoSuspendPolicy": {"enabled": False}},
+            "labels": {**PROJECT_LABELS, "name": config.sandbox_name},
+            "environment": {
+                "SERVICE_BUS_NAMESPACE": (
+                    f"{config.service_bus_namespace}.servicebus.windows.net"
+                ),
+                "SERVICE_BUS_QUEUE": config.service_bus_queue,
+                "WORKER_PORT": str(config.worker_port),
+            },
+            "connections": [credential_id],
+            "volumes": [
+                SandboxVolume(
+                    volume_name=config.volume_name,
+                    mountpoint="/mnt/data",
+                    read_only=False,
+                )._to_dict()
+            ],
+            "entrypoint": ["/usr/local/bin/container-entrypoint"],
+        }
+        created = clients.group._dp_put(
+            f"{clients.group._group_path}/sandboxes", body
+        )
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            sandbox = clients.group.get_sandbox(created["id"])
+            state = str(sandbox.state).lower()
+            if state.endswith("running"):
+                return clients.group.get_sandbox_client(created["id"])
+            if state.endswith(("failed", "deleting")):
+                raise RuntimeError(
+                    f"Sandbox {created['id']} entered terminal state {sandbox.state}."
+                )
+            time.sleep(3)
+        raise TimeoutError(f"Sandbox {created['id']} did not become ready.")
+
     return clients.group.begin_create_sandbox(
         disk=None,
         disk_id=disk_id,
@@ -372,7 +678,14 @@ def create_sandbox(
             )
         ],
         connections=[credential_id],
-        entrypoint=["/usr/local/bin/entrypoint.sh"],
+        environment={
+            "SERVICE_BUS_NAMESPACE": (
+                f"{config.service_bus_namespace}.servicebus.windows.net"
+            ),
+            "SERVICE_BUS_QUEUE": config.service_bus_queue,
+            "WORKER_PORT": str(config.worker_port),
+        },
+        entrypoint=["/usr/local/bin/container-entrypoint"],
     ).result()
 
 

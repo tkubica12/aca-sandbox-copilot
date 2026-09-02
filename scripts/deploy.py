@@ -2,13 +2,26 @@
 """Deploy the Copilot CLI sandbox with the official Sandbox Python SDK."""
 
 from __future__ import annotations
+from azure.mgmt.servicebus.models import (
+    SBAuthorizationRule,
+    SBNamespace,
+    SBQueue,
+    SBSku,
+)
 
 from common import (
+    DATA_OWNER_ROLE_ID,
     PROJECT_LABELS,
+    SERVICE_BUS_RECEIVER_ROLE_ID,
+    SERVICE_BUS_SENDER_ROLE_ID,
     AzureClients,
     Config,
+    configure_connector,
+    create_connector_namespace,
     create_sandbox,
     ensure_data_owner,
+    ensure_role_assignment,
+    identity_principal_id,
     matching_credentials,
     matching_disk_images,
     matching_sandboxes,
@@ -17,17 +30,64 @@ from common import (
 
 
 def main() -> None:
-    config = Config.from_env(require_token=True)
+    config = Config.from_env()
     with AzureClients.create(config) as clients:
         print(f"Creating resource group {config.resource_group}...")
         clients.resources.resource_groups.create_or_update(
-            config.resource_group, {"location": config.location}
+            config.resource_group,
+            {
+                "location": config.location,
+                "tags": {**PROJECT_LABELS, "SecurityControl": "ignore"},
+            },
         )
+
+        print(f"Creating Service Bus namespace {config.service_bus_namespace}...")
+        service_bus = clients.servicebus.namespaces.begin_create_or_update(
+            config.resource_group,
+            config.service_bus_namespace,
+            SBNamespace(
+                location=config.location,
+                sku=SBSku(name="Basic", tier="Basic"),
+                disable_local_auth=False,
+                tags=PROJECT_LABELS,
+            ),
+        ).result()
+        if service_bus.disable_local_auth:
+            raise RuntimeError(
+                "Service Bus local authentication remains disabled. The Connector "
+                "Namespace preview connector requires a connection string."
+            )
+        clients.servicebus.queues.create_or_update(
+            config.resource_group,
+            config.service_bus_namespace,
+            config.service_bus_queue,
+            SBQueue(),
+        )
+        clients.servicebus.namespaces.create_or_update_authorization_rule(
+            config.resource_group,
+            config.service_bus_namespace,
+            "connector-listen",
+            SBAuthorizationRule(rights=["Listen"]),
+        )
+        clients.servicebus.namespaces.create_or_update_authorization_rule(
+            config.resource_group,
+            config.service_bus_namespace,
+            "test-send",
+            SBAuthorizationRule(rights=["Send"]),
+        )
+        connector_keys = clients.servicebus.namespaces.list_keys(
+            config.resource_group,
+            config.service_bus_namespace,
+            "connector-listen",
+        )
+        if not connector_keys.primary_connection_string:
+            raise RuntimeError("Service Bus connector rule returned no connection string.")
 
         print(f"Creating sandbox group {config.sandbox_group}...")
         group = clients.groups.begin_create_group(
             config.sandbox_group,
             config.location,
+            identity={"type": "SystemAssigned"},
             tags=PROJECT_LABELS,
         ).result()
         if group.location.replace(" ", "").lower() != config.location.lower():
@@ -39,13 +99,41 @@ def main() -> None:
         ensure_data_owner(config, clients)
         wait_for_data_plane(clients)
 
+        print(f"Creating Connector Namespace {config.connector_namespace}...")
+        connector_principal_id = create_connector_namespace(config, clients)
+        ensure_role_assignment(
+            config,
+            clients,
+            scope=config.group_scope,
+            principal_id=connector_principal_id,
+            role_id=DATA_OWNER_ROLE_ID,
+            principal_type="ServicePrincipal",
+        )
+        group_principal_id = identity_principal_id(group.identity)
+        for role_id in (SERVICE_BUS_SENDER_ROLE_ID, SERVICE_BUS_RECEIVER_ROLE_ID):
+            ensure_role_assignment(
+                config,
+                clients,
+                scope=config.service_bus_scope,
+                principal_id=group_principal_id,
+                role_id=role_id,
+                principal_type="ServicePrincipal",
+            )
+
         for sandbox in matching_sandboxes(config, clients):
             print(f"Deleting previous sandbox {sandbox.id}...")
             clients.group.get_sandbox_client(sandbox.id).begin_delete().result()
 
-        for credential in matching_credentials(config, clients):
-            print(f"Deleting previous credential {credential['id']}...")
-            clients.connections.delete(credential["id"])
+        existing_credentials = matching_credentials(config, clients)
+        if config.token:
+            if not config.token.startswith("github_pat_"):
+                raise RuntimeError(
+                    "COPILOT_GITHUB_TOKEN must begin with 'github_pat_'."
+                )
+            for credential in existing_credentials:
+                print(f"Deleting previous credential {credential['id']}...")
+                clients.connections.delete(credential["id"])
+            existing_credentials = []
 
         for image in matching_disk_images(config, clients):
             print(f"Deleting previous disk image {image.id}...")
@@ -69,13 +157,22 @@ def main() -> None:
         image = clients.group.begin_create_disk_image(
             config.image,
             name=config.disk_name,
-            entrypoint=["/usr/local/bin/entrypoint.sh"],
+            entrypoint=["/usr/local/bin/container-entrypoint"],
         ).result()
 
-        print("Creating GitHub Copilot provider credential...")
-        provider_credential = clients.connections.create_github_copilot(
-            config.credential_name, config.token
-        )
+        if config.token:
+            print("Creating GitHub Copilot provider credential...")
+            provider_credential = clients.connections.create_github_copilot(
+                config.credential_name, config.token
+            )
+        elif len(existing_credentials) == 1:
+            print("Reusing existing GitHub Copilot provider credential...")
+            provider_credential = existing_credentials[0]
+        else:
+            raise RuntimeError(
+                "Set COPILOT_GITHUB_TOKEN for the initial deployment. It may be "
+                "left blank on later deployments while one matching credential exists."
+            )
 
         print(f"Creating sandbox {config.sandbox_name}...")
         sandbox = create_sandbox(
@@ -84,7 +181,15 @@ def main() -> None:
             disk_id=image.id,
             credential_id=provider_credential["id"],
         )
+        callback_url = configure_connector(
+            config,
+            clients,
+            sandbox_id=sandbox.sandbox_id,
+            connector_principal_id=connector_principal_id,
+            service_bus_connection_string=connector_keys.primary_connection_string,
+        )
         print(f"Sandbox ready: {sandbox.sandbox_id}")
+        print(f"Trigger callback: {callback_url}")
 
 
 if __name__ == "__main__":

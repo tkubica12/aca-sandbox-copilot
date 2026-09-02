@@ -7,7 +7,7 @@
 - Runtime user: root. Workdir/data: `/mnt/data`.
 - Tmux session: `copilot`. Join: `tmux attach -t copilot`.
 - Tmux boot: entrypoint + systemd + profile fallback. Keep all three.
-- Storage: `DataDisk`, `1Gi`. POSIX. One writer. Needs disk suspend mode.
+- Storage: `DataDisk`, `1Gi`. POSIX. One writer.
 - Sandbox: `2000m`, `4096Mi`, 20 GiB root. Leave data-disk headroom.
 - Registry: `ghcr.io/tkubica12/aca-sandbox-copilot`. Public only. No pull secrets.
 - CI: `.github/workflows/image.yml`. PR builds. Main/manual pushes GHCR.
@@ -20,3 +20,14 @@
 - Validate: image build, CLI versions, tmux reconnect, volume survives sandbox replacement.
 - Live test 2026-08-30 westus2: all passed. GHCR anonymous pull passed.
 - Live test 2026-09-01 swedencentral: SDK deploy/cleanup, PAT, tmux, DataDisk passed.
+- Scheduler: Service Bus -> Connector Namespace -> Entra port -> HTTP worker.
+- Connector Namespace preview location defaults to Sandbox region: `swedencentral`.
+- Worker port: 8080, `OnDemand`, namespace MI object allowlist. Audience: `https://auth.adcproxy.io/`.
+- Connector Service Bus auth uses isolated Listen connection string. Sandbox never gets it.
+- Sandbox Group system MI: Service Bus Data Sender + Receiver. Runtime uses `DefaultAzureCredential`.
+- Task types: `prompt` (`copilot --allow-all-tools -p`) or approved `.py`/`.sh` under `/mnt/data/tasks`.
+- Schedule CLI: `schedule-task`. Skill: `/root/.copilot/skills/scheduler/SKILL.md`.
+- Results: `/mnt/data/scheduler/logs`. Recurrence schedules next only after success.
+- Connector/API gaps: ports objectIds + connector children use preview REST.
+- RG tag `SecurityControl=ignore` required here. Connector Service Bus auth needs local key.
+- Auto-suspend: 60s, disk mode. Disk resume reruns `/usr/local/bin/container-entrypoint`.

@@ -12,6 +12,7 @@ The image includes:
 - Bash, Python, pip, uv, Node.js
 - jq, yq, ripgrep, fd, git, SSH, networking and build utilities
 - tmux with a persistent `copilot` session rooted at `/mnt/data`
+- authenticated HTTP task worker and Service Bus scheduling skill
 
 ## Image
 
@@ -80,6 +81,19 @@ Defaults create:
 - public custom disk from `ghcr.io/tkubica12/aca-sandbox-copilot:latest`
 - 1 GiB persistent DataDisk mounted at `/mnt/data`
 - sandbox `copilot-cli` with the GitHub Copilot credential attached
+- Basic Service Bus namespace and `copilot-tasks` queue
+- system-assigned Sandbox Group identity with Service Bus sender/receiver access
+- Connector Namespace trigger with an Entra-protected on-demand worker port
+
+The resource group is tagged `SecurityControl=ignore`. In the tested corporate
+subscription this exempts the demo from the policy that otherwise forces
+Service Bus local authentication off. The preview Connector Namespace Service
+Bus connection currently requires a Listen-only connection string. That
+credential is isolated in Connector Namespace and is never exposed to the
+sandbox. Deployment stops if the policy exemption is not effective.
+
+Connector Namespace is a regional preview and defaults to the Sandbox Group
+region, `swedencentral`.
 
 Change values in `.env` to override these defaults or select an immutable
 timestamp image tag.
@@ -89,8 +103,60 @@ timestamp image tag.
 Run `.venv/bin/python scripts/test.py` on macOS/Linux or
 `.venv\Scripts\python.exe scripts\test.py` on Windows.
 
-The test checks the installed CLIs, tmux, Copilot authentication, and DataDisk
-persistence across sandbox replacement.
+The test checks the installed CLIs, tmux, worker authentication, Copilot,
+DataDisk access, script and prompt dispatch, managed-identity scheduling, and
+recurrence.
+
+## Schedule work
+
+Run these commands inside the sandbox. Times must be future ISO 8601 timestamps
+with an offset; using UTC with `Z` is recommended.
+
+```console
+schedule-task prompt --at 2026-09-02T06:00:00Z \
+  --prompt "Inspect open issues and summarize blockers"
+
+schedule-task script --at 2026-09-02T06:00:00Z \
+  --script report.py --arg weekly
+
+schedule-task prompt --at 2026-09-07T06:00:00Z \
+  --every weekly --prompt "Prepare the weekly repository report"
+```
+
+Scripts must be `.py` or `.sh` files below `/mnt/data/tasks`. Arbitrary shell
+text and absolute paths are rejected. Results are persisted as JSON in
+`/mnt/data/scheduler/logs`; worker logs are in
+`/mnt/data/scheduler/worker.log`.
+
+The message schema is:
+
+```json
+{
+  "version": 1,
+  "id": "UUID",
+  "type": "prompt",
+  "prompt": "Work to perform",
+  "scheduled_at": "2026-09-02T06:00:00Z",
+  "recurrence": null
+}
+```
+
+For a script, replace `prompt` with `"script": "report.py"` and
+`"args": ["weekly"]`. Recurrence is either `null` or
+`{"frequency":"daily|weekly","interval":1}`. A successful recurring task
+schedules its next occurrence.
+
+Service Bus scheduled delivery is external to the sandbox. The Connector
+Namespace polls the queue, consumes due messages, and posts the connector
+payload to the sandbox's Entra-protected port. The Connector Namespace identity
+is the only allowed port caller. The Sandbox Group identity schedules messages
+without keys through `DefaultAzureCredential`.
+
+Auto-suspend defaults to 60 seconds in disk mode because the attached DataDisk
+does not support memory-mode suspension. On resume, the sandbox starts the
+image entrypoint again, restores the tmux session, and runs the HTTP worker.
+The worker port uses `activationMode=OnDemand`, so the Connector Namespace
+callback wakes a stopped sandbox before delivering the due task.
 
 ## Connect
 
@@ -106,13 +172,13 @@ Run `.venv/bin/python scripts/cleanup.py` on macOS/Linux or
 `.venv\Scripts\python.exe scripts\cleanup.py` on Windows.
 
 `DataDisk` is single-writer, full-POSIX storage and fits durable agent
-workspaces. It requires disk-mode auto-suspend, which the deployment configures.
-The sandbox uses a 20 GiB root disk, leaving disk-budget headroom for the
-1 GiB data disk at 2000m CPU.
+workspaces. The sandbox uses a 20 GiB root disk, leaving disk-budget headroom
+for the 1 GiB data disk at 2000m CPU.
 
 ## References
 
 - [ACA Sandboxes CLI quickstart](https://learn.microsoft.com/azure/container-apps/sandboxes-quickstart-cli)
 - [Sandbox disk images](https://sandboxes.azure.com/docs/sandboxes/disk-images)
 - [Sandbox volumes](https://sandboxes.azure.com/docs/sandboxes/volumes)
+- [Sandbox triggers](https://sandboxes.azure.com/docs/sandboxes/triggers)
 - [Install GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli)
